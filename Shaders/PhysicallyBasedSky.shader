@@ -2,7 +2,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 {
     Properties
     {
-
+        [NoScaleOffset] _SpaceEmissionTexture("Space Emission Texture (HDR)", Cube) = "black" {}
     }
 
     SubShader
@@ -75,6 +75,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             TEXTURECUBE(_GroundAlbedoTexture);
             TEXTURECUBE(_GroundEmissionTexture);
             TEXTURECUBE(_SpaceEmissionTexture);
+            half4 _SpaceEmissionTexture_HDR;
 
             float4 RenderSky(float2 screenUV, float3 positionWS)
             {
@@ -194,7 +195,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                     {
                         // V points towards the camera.
                         half4 ts = SAMPLE_TEXTURECUBE(_SpaceEmissionTexture, s_trilinear_clamp_sampler, mul(-V, (half3x3)_SpaceRotation));
-                        radiance += _SpaceEmissionMultiplier * ts.rgb;
+                        radiance += _SpaceEmissionMultiplier * DecodeHDREnvironment(ts, _SpaceEmissionTexture_HDR);
                     }
                 }
 
@@ -291,6 +292,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             TEXTURECUBE(_GroundAlbedoTexture);
             TEXTURECUBE(_GroundEmissionTexture);
             TEXTURECUBE(_SpaceEmissionTexture);
+            half4 _SpaceEmissionTexture_HDR;
 
             float4 RenderSky(float2 screenUV, float3 positionWS)
             {
@@ -403,7 +405,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                     {
                         // V points towards the camera.
                         half4 ts = SAMPLE_TEXTURECUBE(_SpaceEmissionTexture, s_trilinear_clamp_sampler, mul(-V, (half3x3)_SpaceRotation));
-                        radiance += _SpaceEmissionMultiplier * ts.rgb;
+                        radiance += _SpaceEmissionMultiplier * DecodeHDREnvironment(ts, _SpaceEmissionTexture_HDR);
                     }
                 }
 
