@@ -284,7 +284,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         VisualEnvironment visualEnvVolume = stack.GetComponent<VisualEnvironment>();
         Fog fogVolume = stack.GetComponent<Fog>();
 
-        bool isPbrSky = pbrSkyVolume != null && visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == (int)VisualEnvironment.SkyType.PhysicallyBased;
+        const int physicallyBased = (int)VisualEnvironment.SkyType.PhysicallyBased;
+        bool isPbrSky = pbrSkyVolume != null && visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == physicallyBased;
 
         {
             bool halfResolutionLuts = m_Precomputation == PrecomputationQualityMode.Low;
