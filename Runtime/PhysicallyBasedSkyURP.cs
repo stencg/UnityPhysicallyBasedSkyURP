@@ -15,7 +15,7 @@ using UnityEngine.Rendering.RenderGraphModule;
 /// </summary>
 [DisallowMultipleRendererFeature("Physically Based Sky URP")]
 [Tooltip("Add this Renderer Feature to support visual environment override in URP Volume.")]
-[HelpURL("https://github.com/jiaozi158/UnityPhysicallyBasedSkyURP/tree/main")]
+[HelpURL("https://github.com/stencg/UnityPhysicallyBasedSkyURP/tree/main")]
 public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 {
     public enum PrecomputationQualityMode
@@ -1499,8 +1499,16 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.lutMaterial = lutMaterial;
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
+                // All LUT textures written in ExecutePass must be declared so the Render Graph
+                // properly tracks the writes. Missing declarations cause the blits to be
+                // ineffective in Unity 6.3+ where Compatibility Mode is removed and the stricter
+                // shared Render Graph backend is the only path.
                 builder.UseTexture(passData.multiScatteringLUTHandle, AccessFlags.ReadWrite);
                 builder.UseTexture(passData.skyViewLUTHandle, AccessFlags.ReadWrite);
+                builder.UseTexture(passData.airSingleScatteringHandle, AccessFlags.ReadWrite);
+                builder.UseTexture(passData.aerosolSingleScatteringHandle, AccessFlags.ReadWrite);
+                builder.UseTexture(passData.multipleScatteringHandle, AccessFlags.ReadWrite);
+                builder.UseTexture(passData.groundIrradianceHandle, AccessFlags.ReadWrite);
 
                 builder.AllowGlobalStateModification(true);
 
@@ -2309,10 +2317,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.isStereoEnabled = cameraData.camera.stereoEnabled;
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
-                builder.UseTexture(passData.probeColorHandle, AccessFlags.Write);
+                // probeColorHandle is both read (blit source) and written (render target) in ExecutePass
+                builder.UseTexture(passData.probeColorHandle, AccessFlags.ReadWrite);
 
                 if (hasVolumetricClouds)
-                    builder.UseTexture(passData.skyColorHandle, AccessFlags.Write);
+                    builder.UseTexture(passData.skyColorHandle, AccessFlags.ReadWrite);
 
                 // Shader keyword changes are considered as global state modifications
                 builder.AllowGlobalStateModification(true);
