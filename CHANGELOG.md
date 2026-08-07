@@ -5,6 +5,22 @@ All notable changes to this package will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-08-07
+
+### Added
+
+- Added Burst compiler support for atmospheric optical depth calculations to improve performance.
+
+### Fixed
+
+- Fixed Unity 6.4 API changes for ScriptableRenderPass.
+- Fixed texture access flags in ExecutePass for Unity 6.3+ where Compatibility Mode is removed; LUTs and other textures are now declared as ReadWrite to align with stricter Render Graph requirements.
+
+### Known Issues
+
+- Compatibility Mode does not work.
+
+
 ## [1.0.5] - 2026-07-25
 
 ### Fixed
