@@ -1317,27 +1317,61 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal bool isStereoEnabled;
         }
 
-        // This static method is used to execute the pass and passed as the RenderFunc delegate to the RenderGraph render pass
-        static void ExecutePass(PassData data, UnsafeGraphContext context)
+        private static readonly MaterialPropertyBlock s_LutPropertyBlock = new MaterialPropertyBlock();
+        private static readonly int blitTextureTexelSize = Shader.PropertyToID("_BlitTexture_TexelSize");
+        private static readonly int blitScaleBias = Shader.PropertyToID("_BlitScaleBias");
+
+        static void DrawLut(CommandBuffer cmd, Material material, int pass, int width, int height)
+        {
+            s_LutPropertyBlock.Clear();
+            s_LutPropertyBlock.SetVector(blitTextureTexelSize, new Vector4(1.0f / width, 1.0f / height, width, height));
+            s_LutPropertyBlock.SetVector(blitScaleBias, m_ScaleBias);
+            cmd.SetViewport(new Rect(0.0f, 0.0f, width, height));
+            CoreUtils.DrawFullScreen(cmd, material, s_LutPropertyBlock, pass);
+        }
+
+#if UNITY_EDITOR
+        static void EnsureLutPassesCompiled(Material material)
+        {
+            // Precomputation only runs when its inputs change. If async shader compilation is
+            // still in progress on a cold editor or platform start, placeholder draws would make
+            // the persistent LUTs black with no later reason to regenerate them.
+            for (int pass = 0; pass <= 3; pass++)
+            {
+                if (!UnityEditor.ShaderUtil.IsPassCompiled(material, pass))
+                    UnityEditor.ShaderUtil.CompilePass(material, pass, forceSync: true);
+            }
+        }
+#endif
+
+        static void ExecuteMultiScatteringPass(PassData data, UnsafeGraphContext context)
         {
             CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
             if (data.isStereoEnabled)
                 cmd.DisableShaderKeyword(STEREO_INSTANCING_ON);
 
-            if (data.precomputationChanged)
-            {
-                Blitter.BlitCameraTexture(cmd, data.multiScatteringLUTHandle, data.multiScatteringLUTHandle, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store, data.lutMaterial, pass: 1);
-            }
+            cmd.SetRenderTarget(data.multiScatteringLUTHandle);
+            DrawLut(cmd, data.lutMaterial, 1, k_MultiScatteringLutWidth, k_MultiScatteringLutHeight);
+
+            if (data.isStereoEnabled)
+                cmd.EnableShaderKeyword(STEREO_INSTANCING_ON);
+        }
+
+        static void ExecuteLutGenerationPass(PassData data, UnsafeGraphContext context)
+        {
+            CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+
+            if (data.isStereoEnabled)
+                cmd.DisableShaderKeyword(STEREO_INSTANCING_ON);
 
             data.lutMaterial.SetTexture(multiScatteringLUT, data.multiScatteringLUTHandle);
-            
+
             if (data.cameraSpaceSky)
             {
-                Blitter.BlitCameraTexture(cmd, data.skyViewLUTHandle, data.skyViewLUTHandle, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store, data.lutMaterial, pass: 0);
+                cmd.SetRenderTarget(data.skyViewLUTHandle);
+                DrawLut(cmd, data.lutMaterial, 0, k_SkyViewLutWidth, k_SkyViewLutHeight);
             }
-
-            cmd.SetGlobalTexture(skyViewLUT, data.skyViewLUTHandle);
 
             if (data.precomputationChanged)
             {
@@ -1351,13 +1385,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 {
                     cmd.SetGlobalInteger(PBSky_TableCoord_Z, slice);
                     cmd.SetRenderTarget(data.lutHandles, data.airSingleScatteringHandle, 0, CubemapFace.Unknown, slice);
-
-                    Blitter.BlitTexture(cmd, data.airSingleScatteringHandle, m_ScaleBias, data.lutMaterial, pass: 2);
-                }
-
-                if (!data.cameraSpaceSky)
-                {
-                    Blitter.BlitCameraTexture(cmd, data.groundIrradianceHandle, data.groundIrradianceHandle, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store, data.lutMaterial, pass: 3);
+                    DrawLut(cmd, data.lutMaterial, 2,
+                        data.halfResolutionLuts ? k_InScatteredRadianceTableSizeX / 2 : k_InScatteredRadianceTableSizeX,
+                        data.halfResolutionLuts ? (k_InScatteredRadianceTableSizeZ * k_InScatteredRadianceTableSizeW) / 2 : k_InScatteredRadianceTableSizeZ * k_InScatteredRadianceTableSizeW);
                 }
             }
 
@@ -1386,31 +1416,39 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             cmd.SetGlobalTexture(atmosphericScatteringLUT, data.atmosphericScatteringLUTHandle);
             */
 
+            if (data.isStereoEnabled)
+                cmd.EnableShaderKeyword(STEREO_INSTANCING_ON);
+        }
+
+        static void ExecuteGroundIrradiancePass(PassData data, UnsafeGraphContext context)
+        {
+            CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+
+            if (data.isStereoEnabled)
+                cmd.DisableShaderKeyword(STEREO_INSTANCING_ON);
+
             cmd.SetGlobalTexture(airSingleScatteringTexture, data.airSingleScatteringHandle);
             cmd.SetGlobalTexture(aerosolSingleScatteringTexture, data.aerosolSingleScatteringHandle);
             cmd.SetGlobalTexture(multipleScatteringTexture, data.multipleScatteringHandle);
-            cmd.SetGlobalTexture(groundIrradianceTexture, data.groundIrradianceHandle);
+
+            cmd.SetRenderTarget(data.groundIrradianceHandle);
+            DrawLut(cmd, data.lutMaterial, 3, k_GroundIrradianceTableSize, 1);
 
             if (data.isStereoEnabled)
                 cmd.EnableShaderKeyword(STEREO_INSTANCING_ON);
+        }
+
+        static void ExecutePublishLutsPass(PassData data, UnsafeGraphContext context)
+        {
         }
 
         // This is where the renderGraph handle can be accessed.
         // Each ScriptableRenderPass can use the RenderGraph handle to add multiple render passes to the render graph
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
-            // add an unsafe render pass to the render graph, specifying the name and the data type that will be passed to the ExecutePass function
-            using (var builder = renderGraph.AddUnsafePass<PassData>(profilerTag, out var passData))
-            {
-                // UniversalResourceData contains all the texture handles used by the renderer, including the active color and depth textures
-                // The active color and depth textures are the main color and depth buffers that the camera renders into
-                UniversalRenderingData universalRenderingData = frameData.Get<UniversalRenderingData>();
-                UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
-                UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
+            UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 
-                bool precomputationChanged = HasPrecomputationDataChanged();
-                //bool celestialBodyDataChanged = HasCelestialBodyDataChanged();
-                bool lutDataChanged;
+            bool lutDataChanged;
 
                 RenderTextureDescriptor desc = cameraData.cameraTargetDescriptor;
                 desc.depthBufferBits = 0;
@@ -1450,26 +1488,35 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 lutDataChanged |= RenderingUtils.ReAllocateHandleIfNeeded(ref multipleScatteringHandle, desc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: _MultipleScatteringTexture);
                 TextureHandle multipleScatteringTextureHandle = renderGraph.ImportTexture(multipleScatteringHandle);
 
-                // Unused
-                /*
-                desc.width = k_AtmosphericScatteringLutWidth;
-                desc.height = k_AtmosphericScatteringLutHeight;
-                desc.volumeDepth = k_AtmosphericScatteringLutDepth;
-                RenderingUtils.ReAllocateHandleIfNeeded(ref atmosphericScatteringLUTHandle, desc, FilterMode.Point, TextureWrapMode.Clamp, name: _AtmosphericScatteringLUT);
-                TextureHandle atmosphericScatteringLUTTextureHandle = renderGraph.ImportTexture(atmosphericScatteringLUTHandle);
-                TextureHandle skyTransmittanceHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, desc, name: "_SkyTransmittance", false, FilterMode.Point, TextureWrapMode.Clamp);
+            lutDataChanged |= HasLutDataChanged();
+            if (lutDataChanged)
+                m_LastPrecomputationParamHash = 0;
+            bool precomputationChanged = HasPrecomputationDataChanged() || lutDataChanged;
 
-                desc.dimension = TextureDimension.Tex2D;
-                desc.volumeDepth = 1;
-                TextureHandle atmosphericScatteringSliceHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, desc, name: "_AtmosphericScatteringSlice", false, FilterMode.Point, TextureWrapMode.Clamp);
-                TextureHandle skyTransmittanceSliceHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, desc, name: "_SkyTransmittanceSlice", false, FilterMode.Point, TextureWrapMode.Clamp);
-                */
+#if UNITY_EDITOR
+            if (precomputationChanged)
+                EnsureLutPassesCompiled(lutMaterial);
+#endif
 
-                lutDataChanged |= HasLutDataChanged();
-                m_LastPrecomputationParamHash = lutDataChanged ? 0 : m_LastPrecomputationParamHash;
+            bool cameraSpaceSky = visualEnvironment.renderingSpace.value == VisualEnvironment.RenderingSpace.Camera;
 
+            if (precomputationChanged)
+            {
+                using var builder = renderGraph.AddUnsafePass<PassData>($"{profilerTag} (Multiple Scattering)", out var passData);
+                passData.multiScatteringLUTHandle = multiScatteringLUTTextureHandle;
+                passData.lutMaterial = lutMaterial;
+                passData.isStereoEnabled = cameraData.camera.stereoEnabled;
+
+                builder.UseTexture(passData.multiScatteringLUTHandle, AccessFlags.Write);
+                builder.AllowGlobalStateModification(true);
+                builder.SetRenderFunc((PassData data, UnsafeGraphContext context) => ExecuteMultiScatteringPass(data, context));
+            }
+
+            // Keep the 3D LUT producer separate from its ground-irradiance consumer so
+            // RenderGraph can insert the attachment-write to shader-read transition on Vulkan.
+            using (var builder = renderGraph.AddUnsafePass<PassData>($"{profilerTag} (LUT Generation)", out var passData))
+            {
                 passData.lutHandles = lutHandles;
-                //passData.sliceHandles = sliceHandles;
                 passData.multiScatteringLUTHandle = multiScatteringLUTTextureHandle;
                 passData.skyViewLUTHandle = skyViewLUTTextureHandle;
                 passData.airSingleScatteringHandle = airSingleScatteringTextureHandle;
@@ -1477,43 +1524,68 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.multipleScatteringHandle = multipleScatteringTextureHandle;
                 passData.groundIrradianceHandle = groundIrradianceTextureHandle;
 
-                // Unused
-                /*
-                passData.atmosphericScatteringLUTHandle = atmosphericScatteringLUTTextureHandle;
-                passData.skyTransmittanceHandle = skyTransmittanceHandle;
-                passData.atmosphericScatteringSliceHandle = atmosphericScatteringSliceHandle;
-                passData.skyTransmittanceSliceHandle = skyTransmittanceSliceHandle;
-
-                builder.UseTexture(passData.atmosphericScatteringLUTHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.atmosphericScatteringSliceHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.skyTransmittanceHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.skyTransmittanceSliceHandle, AccessFlags.ReadWrite);
-                */
-
-                passData.cameraSpaceSky = visualEnvironment.renderingSpace.value == VisualEnvironment.RenderingSpace.Camera;
+                passData.cameraSpaceSky = cameraSpaceSky;
                 passData.precomputedAtmosphericScattering = pbrSky.atmosphericScattering.value;
                 passData.halfResolutionLuts = halfResolutionLuts;
-                passData.precomputationChanged = precomputationChanged || lutDataChanged;
-                //passData.celestialBodyDataChanged = celestialBodyDataChanged || lutDataChanged;
+                passData.precomputationChanged = precomputationChanged;
                 passData.isStereoEnabled = cameraData.camera.stereoEnabled;
                 passData.lutMaterial = lutMaterial;
 
-                // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
-                // All LUT textures written in ExecutePass must be declared so the Render Graph
-                // properly tracks the writes. Missing declarations cause the blits to be
-                // ineffective in Unity 6.3+ where Compatibility Mode is removed and the stricter
-                // shared Render Graph backend is the only path.
-                builder.UseTexture(passData.multiScatteringLUTHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.skyViewLUTHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.airSingleScatteringHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.aerosolSingleScatteringHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.multipleScatteringHandle, AccessFlags.ReadWrite);
-                builder.UseTexture(passData.groundIrradianceHandle, AccessFlags.ReadWrite);
+                builder.UseTexture(passData.multiScatteringLUTHandle, AccessFlags.Read);
+                builder.UseTexture(passData.skyViewLUTHandle, cameraSpaceSky ? AccessFlags.Write : AccessFlags.Read);
+                builder.UseTexture(passData.airSingleScatteringHandle, precomputationChanged ? AccessFlags.Write : AccessFlags.Read);
+                builder.UseTexture(passData.aerosolSingleScatteringHandle, precomputationChanged ? AccessFlags.Write : AccessFlags.Read);
+                builder.UseTexture(passData.multipleScatteringHandle, precomputationChanged ? AccessFlags.Write : AccessFlags.Read);
+                builder.UseTexture(passData.groundIrradianceHandle, AccessFlags.Read);
 
                 builder.AllowGlobalStateModification(true);
 
-                // Assign the ExecutePass function to the render pass delegate, which will be called by the render graph when executing the pass
-                builder.SetRenderFunc((PassData data, UnsafeGraphContext context) => ExecutePass(data, context));
+                builder.SetRenderFunc((PassData data, UnsafeGraphContext context) => ExecuteLutGenerationPass(data, context));
+            }
+
+            if (precomputationChanged && !cameraSpaceSky)
+            {
+                using var builder = renderGraph.AddUnsafePass<PassData>($"{profilerTag} (Ground Irradiance)", out var passData);
+                passData.airSingleScatteringHandle = airSingleScatteringTextureHandle;
+                passData.aerosolSingleScatteringHandle = aerosolSingleScatteringTextureHandle;
+                passData.multipleScatteringHandle = multipleScatteringTextureHandle;
+                passData.groundIrradianceHandle = groundIrradianceTextureHandle;
+                passData.lutMaterial = lutMaterial;
+                passData.isStereoEnabled = cameraData.camera.stereoEnabled;
+
+                builder.UseTexture(passData.airSingleScatteringHandle, AccessFlags.Read);
+                builder.UseTexture(passData.aerosolSingleScatteringHandle, AccessFlags.Read);
+                builder.UseTexture(passData.multipleScatteringHandle, AccessFlags.Read);
+                builder.UseTexture(passData.groundIrradianceHandle, AccessFlags.Write);
+                builder.AllowGlobalStateModification(true);
+
+                builder.SetRenderFunc((PassData data, UnsafeGraphContext context) => ExecuteGroundIrradiancePass(data, context));
+            }
+
+            // URP's skybox renderer list does not declare its global texture reads. End LUT
+            // generation with an explicit read-only pass so Vulkan transitions every LUT to a
+            // shader-readable layout before the skybox samples the published globals.
+            using (var builder = renderGraph.AddUnsafePass<PassData>($"{profilerTag} (Publish LUTs)", out var passData))
+            {
+                passData.skyViewLUTHandle = skyViewLUTTextureHandle;
+                passData.airSingleScatteringHandle = airSingleScatteringTextureHandle;
+                passData.aerosolSingleScatteringHandle = aerosolSingleScatteringTextureHandle;
+                passData.multipleScatteringHandle = multipleScatteringTextureHandle;
+                passData.groundIrradianceHandle = groundIrradianceTextureHandle;
+
+                builder.UseTexture(passData.skyViewLUTHandle, AccessFlags.Read);
+                builder.UseTexture(passData.airSingleScatteringHandle, AccessFlags.Read);
+                builder.UseTexture(passData.aerosolSingleScatteringHandle, AccessFlags.Read);
+                builder.UseTexture(passData.multipleScatteringHandle, AccessFlags.Read);
+                builder.UseTexture(passData.groundIrradianceHandle, AccessFlags.Read);
+                builder.SetGlobalTextureAfterPass(passData.skyViewLUTHandle, skyViewLUT);
+                builder.SetGlobalTextureAfterPass(passData.airSingleScatteringHandle, airSingleScatteringTexture);
+                builder.SetGlobalTextureAfterPass(passData.aerosolSingleScatteringHandle, aerosolSingleScatteringTexture);
+                builder.SetGlobalTextureAfterPass(passData.multipleScatteringHandle, multipleScatteringTexture);
+                builder.SetGlobalTextureAfterPass(passData.groundIrradianceHandle, groundIrradianceTexture);
+                builder.AllowPassCulling(false);
+
+                builder.SetRenderFunc((PassData data, UnsafeGraphContext context) => ExecutePublishLutsPass(data, context));
             }
         }
         #endregion
@@ -1730,6 +1802,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
+                builder.UseAllGlobalTextures(true);
 
                 builder.AllowGlobalStateModification(true);
 
@@ -2322,6 +2395,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
                 if (hasVolumetricClouds)
                     builder.UseTexture(passData.skyColorHandle, AccessFlags.ReadWrite);
+
+                // Sky and cloud materials sample LUTs published by earlier RenderGraph passes.
+                builder.UseAllGlobalTextures(true);
 
                 // Shader keyword changes are considered as global state modifications
                 builder.AllowGlobalStateModification(true);
