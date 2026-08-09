@@ -5,6 +5,19 @@ All notable changes to this package will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-08-09
+
+### Fixed
+
+- Fixed black skies after cold editor starts and platform switches by compiling required LUT shader passes before one-time precomputation.
+- Fixed high-quality precomputation on Unity 6 Render Graph by removing texture feedback loops and declaring the required LUT write-to-read transitions.
+- Fixed global LUT dependencies for atmospheric scattering and ambient probe rendering.
+
+### Known Issues
+
+- Compatibility Mode does not work.
+
+
 ## [1.0.6] - 2026-08-07
 
 ### Added
