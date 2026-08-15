@@ -406,7 +406,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
     #if UNITY_EDITOR
         // Re-bake the sky ambient probe
-        if (isSkyTypeChanged && (!isPbrSky || !isDynamicSky) && RenderSettings.skybox != null)
+        // A static PBR sky is assigned at runtime, before it has rendered. Preserve the
+        // scene's baked ambient probe instead of replacing it with stale sky material data.
+        if (isSkyTypeChanged && !isPbrSky && RenderSettings.skybox != null)
         {
             DynamicGI.UpdateEnvironment();
         }
