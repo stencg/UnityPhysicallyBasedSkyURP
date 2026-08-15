@@ -26,10 +26,11 @@ struct CelestialBodyData
     float earthshine;
     float4 surfaceTextureScaleOffset;
     half3 sunDirection;
-    half flareCosInner;
+    // The 0.25 degree solar radius needs more precision than half near 1.0.
+    float flareCosInner;
     //half2 phaseAngleSinCos;
-    half flareCosOuter;
-    half flareSize;
+    float flareCosOuter;
+    float flareSize;
     float3 flareColor;
     half flareFalloff;
     //float3 padding;
@@ -108,7 +109,7 @@ float3 RenderSunDisk(inout float tFrag, float tExit, float3 V)
             // We may be able to see the celestial body.
             float3 L = -light.forward.xyz;
 
-            float LdotV = -dot(L, V);
+            float LdotV = clamp(-dot(L, V), -1.0, 1.0);
             float radInner = light.angularRadius;
 
             if (LdotV >= light.flareCosInner) // Sun disk.

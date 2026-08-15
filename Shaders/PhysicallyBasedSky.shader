@@ -82,10 +82,11 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                 const float R = _PlanetaryRadius;
 
             #ifdef SKY_NOT_BAKING
-                const half3 V = normalize(GetCameraPositionWS() - positionWS);
+                // Keep the direction full precision so the sub-degree sun disk stays circular on mobile GPUs.
+                const float3 V = normalize(GetCameraPositionWS() - positionWS);
                 const bool renderSunDisk = _RenderSunDisk != 0;
             #else
-                const half3 V = normalize(-positionWS);
+                const float3 V = normalize(-positionWS);
                 const bool renderSunDisk = false;
             #endif
                 
@@ -297,7 +298,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             float4 RenderSky(float2 screenUV, float3 positionWS)
             {
                 const float R = _PlanetaryRadius;
-                const half3 V = normalize(GetCameraPositionWS() - positionWS);
+                const float3 V = normalize(GetCameraPositionWS() - positionWS);
                 const bool renderSunDisk = _RenderSunDisk != 0;
                 half3 N; float r; // These params correspond to the entry point
 

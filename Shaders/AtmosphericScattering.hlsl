@@ -88,7 +88,7 @@ half3 GetFogColor(half3 V, float fragDist)
 // We evaluate atmospheric scattering for the sky and other celestial bodies
 // during the sky pass. The opaque atmospheric scattering pass applies atmospheric
 // scattering to all other opaque geometry.
-void EvaluatePbrAtmosphere(float3 positionPS, half3 V, float distAlongRay, bool renderSunDisk,
+void EvaluatePbrAtmosphere(float3 positionPS, float3 V, float distAlongRay, bool renderSunDisk,
                            out half3 skyColor, out half3 skyOpacity)
 {
     skyColor = skyOpacity = 0;
@@ -166,25 +166,25 @@ void EvaluatePbrAtmosphere(float3 positionPS, half3 V, float distAlongRay, bool 
         {
             //CelestialBodyData light = _CelestialBodyDatas[i];
             CelestialBodyData light = GetCelestialBody();
-            half3 L = -light.forward.xyz;
+            float3 L = -light.forward.xyz;
 
             // The sun disk hack causes some issues when applied to nearby geometry, so don't do that.
             if (renderSunDisk && asint(light.angularRadius) != 0 && light.distanceFromCamera <= tFrag)
             {
-                half c = dot(L, -V);
+                float c = clamp(dot(L, -V), -1.0, 1.0);
 
                 if (-0.99999 < c && c < 0.99999)
                 {
-                    half alpha = light.angularRadius;
-                    half beta = FastACos(c);
-                    half gamma = min(alpha, beta);
+                    float alpha = light.angularRadius;
+                    float beta = FastACos(c);
+                    float gamma = min(alpha, beta);
 
                     // Make sure that if (beta = Pi), no rotation is performed.
                     gamma *= (PI - beta) * rcp(PI - gamma);
 
                     // Perform a shortest arc rotation.
-                    half3   A = normalize(cross(L, -V));
-                    half3x3 R = RotationFromAxisAngle(A, sin(gamma), cos(gamma));
+                    float3   A = normalize(cross(L, -V));
+                    float3x3 R = RotationFromAxisAngle(A, sin(gamma), cos(gamma));
 
                     // Rotate the light direction.
                     L = mul(R, L);

@@ -252,11 +252,11 @@ public class PhysicallyBasedSky : VolumeComponent, IPostProcessComponent
 
     /// <summary>Exposure of the sky.</summary>
     [Tooltip("Sets the exposure of the sky in EV.")]
-    public FloatParameter exposure = new FloatParameter(0.0f);
+    public FloatParameter exposure = new FloatParameter(2.0f);
 
     /// <summary>Intensity Multipler of the sky.</summary>
     [Tooltip("Sets the intensity multiplier for the sky.")]
-    public MinFloatParameter multiplier = new MinFloatParameter(1.0f, 0.0f);
+    public MinFloatParameter multiplier = new MinFloatParameter(3.5f, 0.0f);
 
     /// <summary>Informative helper that displays the relative intensity (in Lux) for the current HDR texture set in HDRI Sky.</summary>
     [Tooltip("Informative helper that displays the relative intensity (in Lux) for the current HDR texture set in HDRI Sky.")]
