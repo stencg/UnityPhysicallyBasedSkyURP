@@ -5,6 +5,14 @@ All notable changes to this package will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-08-15
+
+### Fixed
+
+- Fixed block-shaped sun disk artifacts on Android by retaining full precision for celestial and atmospheric view calculations.
+- Fixed static PBR skies replacing baked ambient lighting with stale or dark probe data during scene reloads and build startup.
+
+
 ## [1.0.7] - 2026-08-09
 
 ### Fixed
