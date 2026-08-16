@@ -273,7 +273,10 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         m_AtmosphericScatteringPass ??= new AtmosphericScatteringPass(m_PbrSkyLUTMaterial)
         {
-            renderPassEvent = RenderPassEvent.AfterRenderingSkybox + 1
+            // Cloud and other sky effects render immediately before transparents. Apply the
+            // fullscreen fog afterwards so those effects receive fog without fogging opaque
+            // geometry twice, while still leaving transparent objects to their material fog.
+            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents + 1
         };
 
         m_AtmosphericScatteringPass.lutMaterial = m_PbrSkyLUTMaterial;
