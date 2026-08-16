@@ -1777,6 +1777,13 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private static readonly int _PlanetUpAltitude = Shader.PropertyToID("_PlanetUpAltitude");
         private static readonly int _UnderWaterEnabled = Shader.PropertyToID("_UnderWaterEnabled");
         private static readonly int _FogWaterHeight = Shader.PropertyToID("_FogWaterHeight");
+        private static readonly int _FogSHAr = Shader.PropertyToID("_FogSHAr");
+        private static readonly int _FogSHAg = Shader.PropertyToID("_FogSHAg");
+        private static readonly int _FogSHAb = Shader.PropertyToID("_FogSHAb");
+        private static readonly int _FogSHBr = Shader.PropertyToID("_FogSHBr");
+        private static readonly int _FogSHBg = Shader.PropertyToID("_FogSHBg");
+        private static readonly int _FogSHBb = Shader.PropertyToID("_FogSHBb");
+        private static readonly int _FogSHC = Shader.PropertyToID("_FogSHC");
 
         // "_ScreenSize" that supports dynamic resolution
         private static readonly int _ScreenResolution = Shader.PropertyToID("_ScreenResolution");
@@ -1919,6 +1926,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             Shader.SetGlobalVector(_FogColor, new Color(fogColor.r, fogColor.g, fogColor.b, 0.0f));
             Shader.SetGlobalVector(_MipFogParameters, new Vector4(fog.mipFogNear.value, fog.mipFogFar.value, fog.mipFogMaxMip.value, 0.0f));
 
+            if (fog.colorMode.value == Fog.FogColorMode.SkyColor && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static)
+                SetFogAmbientProbe(RenderSettings.ambientProbe);
+
             // When volumetric fog is disabled, we don't want its color to affect the heightfog. So we pass neutral values here.
             var extinction = ExtinctionFromMeanFreePath(fog.meanFreePath.value);
             Shader.SetGlobalVector(_HeightFogBaseScattering, Vector4.one * extinction);
@@ -1935,6 +1945,17 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             Shader.SetGlobalFloat(_UnderWaterEnabled, fog.underWater.value ? 1.0f : 0.0f);
             Shader.SetGlobalFloat(_FogWaterHeight, fog.waterHeight.value);
+        }
+
+        private static void SetFogAmbientProbe(SphericalHarmonicsL2 ambientProbe)
+        {
+            Shader.SetGlobalVector(_FogSHAr, new Vector4(ambientProbe[0, 3], ambientProbe[0, 1], ambientProbe[0, 2], ambientProbe[0, 0] - ambientProbe[0, 6]));
+            Shader.SetGlobalVector(_FogSHAg, new Vector4(ambientProbe[1, 3], ambientProbe[1, 1], ambientProbe[1, 2], ambientProbe[1, 0] - ambientProbe[1, 6]));
+            Shader.SetGlobalVector(_FogSHAb, new Vector4(ambientProbe[2, 3], ambientProbe[2, 1], ambientProbe[2, 2], ambientProbe[2, 0] - ambientProbe[2, 6]));
+            Shader.SetGlobalVector(_FogSHBr, new Vector4(ambientProbe[0, 4], ambientProbe[0, 5], ambientProbe[0, 6] * 3.0f, ambientProbe[0, 7]));
+            Shader.SetGlobalVector(_FogSHBg, new Vector4(ambientProbe[1, 4], ambientProbe[1, 5], ambientProbe[1, 6] * 3.0f, ambientProbe[1, 7]));
+            Shader.SetGlobalVector(_FogSHBb, new Vector4(ambientProbe[2, 4], ambientProbe[2, 5], ambientProbe[2, 6] * 3.0f, ambientProbe[2, 7]));
+            Shader.SetGlobalVector(_FogSHC, new Vector4(ambientProbe[0, 8], ambientProbe[1, 8], ambientProbe[2, 8], 1.0f));
         }
 
         static float ExtinctionFromMeanFreePath(float meanFreePath)

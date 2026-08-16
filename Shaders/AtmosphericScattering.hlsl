@@ -4,6 +4,7 @@
 #ifndef SHADERGRAPH_PREVIEW
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Debug/DebuggingFullscreen.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/GeometricTools.hlsl"
 #include "./PhysicallyBasedSkyRendering.hlsl"
 #include "./PhysicallyBasedSkyEvaluation.hlsl"
@@ -24,6 +25,20 @@
 
 TEXTURECUBE(_SkyTexture);
 half _SkyTextureMipCounts;
+half4 _FogSHAr;
+half4 _FogSHAg;
+half4 _FogSHAb;
+half4 _FogSHBr;
+half4 _FogSHBg;
+half4 _FogSHBb;
+half4 _FogSHC;
+
+half3 EvaluateFogAmbientProbe(half3 direction)
+{
+    half3 color = SHEvalLinearL0L1(direction, _FogSHAr, _FogSHAg, _FogSHAb);
+    color += SHEvalLinearL2(direction, _FogSHBr, _FogSHBg, _FogSHBb, _FogSHC);
+    return color;
+}
 
 // The "_SkyTexture" is not convolved, so we need an alternative method...
 half3 GetFogColor(half3 V, float fragDist)
@@ -54,9 +69,9 @@ half3 GetFogColor(half3 V, float fragDist)
         UNITY_BRANCH
         if (_SkyTextureMipCounts == 0.0)
         {
-            // GGX convoluted cubemap (baked)
-            half4 encodedIrradiance = SAMPLE_TEXTURECUBE_LOD(_GlossyEnvironmentCubeMap, s_trilinear_clamp_sampler, -V, mipLevel); // '_FogColor' is the tint
-            viewColor = DecodeHDREnvironment(encodedIrradiance, _GlossyEnvironmentCubeMap_HDR);
+            // Static PBR sky publishes its ambient probe directly. Unlike the baked reflection
+            // cubemap, this remains valid after scene loads and ambient-mode changes.
+            viewColor = max(0.0, EvaluateFogAmbientProbe(-V));
         }
         else
         {
