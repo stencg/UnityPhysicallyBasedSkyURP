@@ -234,7 +234,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             bool isCustomSkyType = visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == (int)VisualEnvironment.SkyType.Custom && visualEnvVolume.customSkyMaterial.value != null;
 
-            SetSkybox(isCustomSkyType ? visualEnvVolume.customSkyMaterial.value : m_FallbackSkyMaterial);
+            SetSkybox(isCustomSkyType ? visualEnvVolume.customSkyMaterial.value : m_FallbackSkyMaterial, false);
             RenderSettings.customReflectionTexture = null;
             RenderSettings.defaultReflectionMode = DefaultReflectionMode.Skybox;
 
@@ -400,7 +400,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             : null;
     }
 
-    private static void SetSkybox(Material material)
+    private static void SetSkybox(Material material, bool markSceneDirty)
     {
         if (RenderSettings.skybox == material)
             return;
@@ -408,7 +408,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         RenderSettings.skybox = material;
 
     #if UNITY_EDITOR
-        if (!Application.isPlaying)
+        if (markSceneDirty && !Application.isPlaying)
         {
             var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
             if (scene.IsValid() && scene.isLoaded)
@@ -424,6 +424,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         bool isDynamicSky = visualEnvVolume.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic;
 
+        bool isInitialSkyUpdate = lastSkyType == int.MinValue;
         bool isSkyTypeChanged = lastSkyType != visualEnvVolume.skyType.value;
         bool isAmbientModeChanged = lastSkyAmbientMode != visualEnvVolume.skyAmbientMode.value;
         
@@ -442,7 +443,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             : isSkyTypeChanged // executes once only
             ? m_FallbackSkyMaterial
             : RenderSettings.skybox;
-        SetSkybox(skyMaterial);
+        SetSkybox(skyMaterial, isSkyTypeChanged && !isInitialSkyUpdate && !isPbrSky);
 
     #if UNITY_EDITOR
         // Re-bake the sky ambient probe
