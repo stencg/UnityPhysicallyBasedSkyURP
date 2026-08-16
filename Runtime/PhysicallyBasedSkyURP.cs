@@ -141,6 +141,28 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         set { m_Precomputation = value; }
     }
 
+    /// <summary>
+    /// Evaluates the physically based sky ambient probe for the current sun and camera position.
+    /// </summary>
+    public static SphericalHarmonicsL2 EvaluateAmbientProbe(PhysicallyBasedSky pbrSky, VisualEnvironment visualEnvironment, Light mainLight, Vector3 cameraPosition)
+    {
+        if (pbrSky == null || visualEnvironment == null || mainLight == null)
+            return new SphericalHarmonicsL2();
+
+        float3 positionPS = float3(cameraPosition) - visualEnvironment.GetPlanetCenterRadius(cameraPosition).xyz;
+        float3 sunAttenuation = PBSkyPrePass.EvaluateSunColorAttenuation(pbrSky, visualEnvironment, positionPS, -mainLight.transform.forward);
+
+        Color color = mainLight.color.linear * (mainLight.useColorTemperature ? Mathf.CorrelatedColorTemperatureToRGB(mainLight.colorTemperature) : Color.white);
+        float3 mainLightColor = float3(color.r, color.g, color.b) * mainLight.intensity * sunAttenuation;
+
+    #if URP_PHYSICAL_LIGHT
+        bool isPhysicalLight = mainLight.GetComponent<AdditionalLightData>() != null;
+        mainLightColor = isPhysicalLight ? mainLightColor * rcp(PI) : mainLightColor;
+    #endif
+
+        return PBSkyPrePass.EvaluateAmbientProbe(new SphericalHarmonicsL2(), pbrSky, mainLight.transform.forward, mainLightColor);
+    }
+
     public struct CelestialBodyData
     {
         public Vector3 color;
@@ -512,6 +534,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private const string SKY_NOT_BAKING = "SKY_NOT_BAKING";
 
         private SphericalHarmonicsL2 ambientProbe = new SphericalHarmonicsL2();
+        private bool staticAmbientProbeInitialized;
+        private string staticAmbientProbeScenePath;
 
         private const int fibonacciSamplesCount = 64;
         private static readonly float3[] fibonacciSamples = new float3[] {
@@ -633,11 +657,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             UpdateMaterialProperties(mainLight, camera, material);
             lutMaterial.CopyPropertiesFromMaterial(material);
 
-            if (mainLight != null && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic)
-            {
-                ambientProbe = UpdateAmbientProbe(ambientProbe, mainLight.transform.forward, mainLightColor);
-                RenderSettings.ambientProbe = ambientProbe;
-            }
+            UpdateAmbientProbe(mainLight, camera, mainLightColor);
         }
 
     #if UNITY_6000_0_OR_NEWER
@@ -732,11 +752,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 UpdateMaterialProperties(mainLight, camera, material);
                 lutMaterial.CopyPropertiesFromMaterial(material);
 
-                if (mainLight != null && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic)
-                {
-                    ambientProbe = UpdateAmbientProbe(ambientProbe, mainLight.transform.forward, mainLightColor);
-                    RenderSettings.ambientProbe = ambientProbe;
-                }
+                UpdateAmbientProbe(mainLight, camera, mainLightColor);
 
                 passData.mainLightColor = mainLightColor;
                 passData.enableAtmosphericScattering = pbrSky.atmosphericScattering.value;
@@ -757,7 +773,47 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         }
 
-        SphericalHarmonicsL2 UpdateAmbientProbe(SphericalHarmonicsL2 ambientProbe, float3 lightDirection, float3 lightColor)
+        private void UpdateAmbientProbe(Light mainLight, Camera camera, float3 mainLightColor)
+        {
+            if (mainLight == null)
+                return;
+
+            if (visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic)
+            {
+                staticAmbientProbeInitialized = false;
+                ambientProbe = EvaluateAmbientProbe(ambientProbe, pbrSky, mainLight.transform.forward, mainLightColor);
+                RenderSettings.ambientProbe = ambientProbe;
+                return;
+            }
+
+            if (camera.cameraType != CameraType.Game)
+                return;
+
+            string scenePath = camera.gameObject.scene.path;
+            if (!staticAmbientProbeInitialized || staticAmbientProbeScenePath != scenePath)
+            {
+                ambientProbe = EvaluateAmbientProbe(ambientProbe, pbrSky, mainLight.transform.forward, mainLightColor);
+                staticAmbientProbeInitialized = true;
+                staticAmbientProbeScenePath = scenePath;
+            }
+
+            // Entering Play Mode and loading lighting data can restore the serialized baked
+            // probe. Re-publish the cached PBR probe so static ambient remains deterministic.
+            if (!AmbientProbesEqual(RenderSettings.ambientProbe, ambientProbe))
+                RenderSettings.ambientProbe = ambientProbe;
+        }
+
+        private static bool AmbientProbesEqual(SphericalHarmonicsL2 lhs, SphericalHarmonicsL2 rhs)
+        {
+            for (int rgb = 0; rgb < 3; rgb++)
+                for (int coefficient = 0; coefficient < 9; coefficient++)
+                    if (lhs[rgb, coefficient] != rhs[rgb, coefficient])
+                        return false;
+
+            return true;
+        }
+
+        internal static SphericalHarmonicsL2 EvaluateAmbientProbe(SphericalHarmonicsL2 ambientProbe, PhysicallyBasedSky pbrSky, float3 lightDirection, float3 lightColor)
         {
             ambientProbe.Clear();
 
@@ -996,7 +1052,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             return EvaluateSunColorAttenuation(pbrSky, visualEnvironment, positionPS, sunDirection, estimatePenumbra);
         }
 
-        static float3 EvaluateSunColorAttenuation(PhysicallyBasedSky pbrSky, VisualEnvironment visualEnvironment, float3 positionPS, float3 sunDirection, bool estimatePenumbra = false)
+        internal static float3 EvaluateSunColorAttenuation(PhysicallyBasedSky pbrSky, VisualEnvironment visualEnvironment, float3 positionPS, float3 sunDirection, bool estimatePenumbra = false)
         {
             float r = length(positionPS);
             float cosTheta = dot(positionPS, sunDirection) * rcp(r); // Normalize
