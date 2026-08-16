@@ -43,7 +43,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     [SerializeField] private PrecomputationQualityMode m_Precomputation = PrecomputationQualityMode.High;
 
     private bool isShaderMismatchLogPrinted;
-    private int lastSkyType;
+    private int lastSkyType = int.MinValue;
     private VisualEnvironment.SkyAmbientMode lastSkyAmbientMode;
     
     private CelestialBodyData m_CelestialBodyData = new CelestialBodyData();
@@ -234,7 +234,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             bool isCustomSkyType = visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == (int)VisualEnvironment.SkyType.Custom && visualEnvVolume.customSkyMaterial.value != null;
 
-            RenderSettings.skybox = isCustomSkyType ? visualEnvVolume.customSkyMaterial.value : m_FallbackSkyMaterial;
+            SetSkybox(isCustomSkyType ? visualEnvVolume.customSkyMaterial.value : m_FallbackSkyMaterial);
             RenderSettings.customReflectionTexture = null;
             RenderSettings.defaultReflectionMode = DefaultReflectionMode.Skybox;
 
@@ -400,6 +400,23 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             : null;
     }
 
+    private static void SetSkybox(Material material)
+    {
+        if (RenderSettings.skybox == material)
+            return;
+
+        RenderSettings.skybox = material;
+
+    #if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            if (scene.IsValid() && scene.isLoaded)
+                UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
+        }
+    #endif
+    }
+
     private void UpdateSkySettings(bool isPbrSky, VisualEnvironment visualEnvVolume)
     {
         bool isCustomSky = visualEnvVolume.skyType.value == (int)VisualEnvironment.SkyType.Custom;
@@ -418,13 +435,14 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         }
 
         // Update the sky material
-        RenderSettings.skybox = isPbrSky
+        Material skyMaterial = isPbrSky
             ? m_PbrSkyMaterial
             : isCustomSky && isCustomSkyValid
             ? visualEnvVolume.customSkyMaterial.value
             : isSkyTypeChanged // executes once only
             ? m_FallbackSkyMaterial
             : RenderSettings.skybox;
+        SetSkybox(skyMaterial);
 
     #if UNITY_EDITOR
         // Re-bake the sky ambient probe
