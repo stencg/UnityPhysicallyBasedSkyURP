@@ -41,6 +41,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     [Header("Performance")]
     [Tooltip("The precomputation quality of physically based sky.")]
     [SerializeField] private PrecomputationQualityMode m_Precomputation = PrecomputationQualityMode.High;
+    [Tooltip("Smooths fog only where opaque geometry meets the sky. Reduces aliased fog lines at distant geometry silhouettes.")]
+    [SerializeField] private bool m_FogDepthEdgeAntialiasing = false;
 
     private bool isShaderMismatchLogPrinted;
     private int lastSkyType = int.MinValue;
@@ -69,6 +71,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     private const string k_PbrSkyMaterialName = "Physically Based Sky";
     private const string k_DynamicAmbientProbeKeywordName = "VISUAL_ENVIRONMENT_DYNAMIC_SKY";
     private const string k_AtmosphericScatteringLowResolutionKeywordName = "ATMOSPHERIC_SCATTERING_LOW_RES";
+    private const string k_FogDepthEdgeAntialiasingKeywordName = "_FOG_DEPTH_EDGE_ANTIALIASING";
 
     /// <summary>
     /// Get the skybox material of physically based sky.
@@ -139,6 +142,15 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     {
         get { return m_Precomputation; }
         set { m_Precomputation = value; }
+    }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether fog is anti-aliased at opaque/sky depth edges.
+    /// </summary>
+    public bool FogDepthEdgeAntialiasing
+    {
+        get { return m_FogDepthEdgeAntialiasing; }
+        set { m_FogDepthEdgeAntialiasing = value; }
     }
 
     /// <summary>
@@ -318,6 +330,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             m_PBSkyPrePass.pbrSky = pbrSkyVolume;
             m_SkyViewLUTPass.pbrSky = pbrSkyVolume;
             m_AtmosphericScatteringPass.pbrSky = pbrSkyVolume;
+            m_AtmosphericScatteringPass.fogDepthEdgeAntialiasing = m_FogDepthEdgeAntialiasing;
 
             m_PBSkyPrePass.visualEnvironment = visualEnvVolume;
             m_SkyViewLUTPass.visualEnvironment = visualEnvVolume;
@@ -1765,6 +1778,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         public PhysicallyBasedSky pbrSky;
         public VisualEnvironment visualEnvironment;
         public Fog fog;
+        public bool fogDepthEdgeAntialiasing;
 
         public Material lutMaterial;
 
@@ -1922,6 +1936,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             float4 upAltitude = float4(planetUp, cameraHeight);
 
             Shader.SetGlobalInteger(_FogEnabled, 1);
+            CoreUtils.SetKeyword(lutMaterial, k_FogDepthEdgeAntialiasingKeywordName, fogDepthEdgeAntialiasing);
             Shader.SetGlobalFloat(_MaxFogDistance, fog.maxFogDistance.value);
 
             Color fogColor = (fog.colorMode.value == Fog.FogColorMode.ConstantColor) ? fog.color.value : fog.tint.value;

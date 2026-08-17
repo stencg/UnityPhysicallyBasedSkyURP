@@ -597,6 +597,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
 
             #pragma multi_compile_local_fragment _ LOCAL_SKY
             #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
+            #pragma multi_compile_local_fragment _ _FOG_DEPTH_EDGE_ANTIALIASING
 
             #pragma multi_compile_fragment _ PHYSICALLY_BASED_SKY
             #pragma multi_compile_fragment _ DEBUG_DISPLAY
@@ -651,6 +652,33 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
 
                 half3 volColor, volOpacity = 0.0;
                 EvaluateAtmosphericScattering(posInput, V, volColor, volOpacity);
+
+            #if defined(_FOG_DEPTH_EDGE_ANTIALIASING)
+                if (abs(depth - UNITY_RAW_FAR_CLIP_VALUE) > 1e-6)
+                {
+                    int2 screenSize = int2(_ScreenResolution.xy);
+                    int2 offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+                    int skyNeighborCount = 0;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        int2 neighborCoords = clamp(pixelCoords + offsets[i], int2(0, 0), screenSize - 1);
+                        float neighborDepth = LOAD_TEXTURE2D_X_LOD(_CameraDepthTexture, neighborCoords, 0).r;
+                        if (abs(neighborDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6)
+                            skyNeighborCount++;
+                    }
+
+                    if (skyNeighborCount > 0)
+                    {
+                        PositionInputs skyPosInput = GetPositionInput(input.positionCS.xy, _ScreenResolution.zw, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+                        half3 skyFogColor, skyFogOpacity = 0.0;
+                        EvaluateAtmosphericScattering(skyPosInput, V, skyFogColor, skyFogOpacity);
+
+                        half skyCoverage = skyNeighborCount * 0.2h;
+                        volColor = lerp(volColor, skyFogColor, skyCoverage);
+                        volOpacity = lerp(volOpacity, skyFogOpacity, skyCoverage);
+                    }
+                }
+            #endif
 
                 // We use hardware blend options for better performance
                 half atmosphericOpacity = 1.0 - Min3(volOpacity.x, volOpacity.y, volOpacity.z);
