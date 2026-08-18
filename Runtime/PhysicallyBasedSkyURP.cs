@@ -524,14 +524,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private static readonly int _DisableSunDisk = Shader.PropertyToID("_DisableSunDisk");
 
-        private static readonly int _HasGroundAlbedoTexture = Shader.PropertyToID("_HasGroundAlbedoTexture");
         private static readonly int _GroundAlbedoTexture = Shader.PropertyToID("_GroundAlbedoTexture");
 
-        private static readonly int _HasGroundEmissionTexture = Shader.PropertyToID("_HasGroundEmissionTexture");
         private static readonly int _GroundEmissionTexture = Shader.PropertyToID("_GroundEmissionTexture");
         private static readonly int _GroundEmissionMultiplier = Shader.PropertyToID("_GroundEmissionMultiplier");
 
-        private static readonly int _HasSpaceEmissionTexture = Shader.PropertyToID("_HasSpaceEmissionTexture");
         private static readonly int _SpaceEmissionTexture = Shader.PropertyToID("_SpaceEmissionTexture");
         private static readonly int _SpaceEmissionMultiplier = Shader.PropertyToID("_SpaceEmissionMultiplier");
 
@@ -567,6 +564,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private const string PHYSICALLY_BASED_SKY = "PHYSICALLY_BASED_SKY";
         private const string LOCAL_SKY = "LOCAL_SKY";
         private const string SKY_NOT_BAKING = "SKY_NOT_BAKING";
+        private const string GROUND_ALBEDO_TEXTURE = "_GROUND_ALBEDO_TEXTURE";
+        private const string GROUND_EMISSION_TEXTURE = "_GROUND_EMISSION_TEXTURE";
+        private const string SPACE_EMISSION_TEXTURE = "_SPACE_EMISSION_TEXTURE";
 
         private SphericalHarmonicsL2 ambientProbe = new SphericalHarmonicsL2();
         private bool staticAmbientProbeInitialized;
@@ -951,14 +951,14 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             planetRotationMatrix[1] *= -1;
             planetRotationMatrix[2] *= -1;
 
-            material.SetInteger(_HasGroundAlbedoTexture, pbrSky.groundColorTexture.value == null ? 0 : 1);
+            CoreUtils.SetKeyword(material, GROUND_ALBEDO_TEXTURE, pbrSky.groundColorTexture.value != null);
             material.SetTexture(_GroundAlbedoTexture, pbrSky.groundColorTexture.value);
 
-            material.SetInteger(_HasGroundEmissionTexture, pbrSky.groundEmissionTexture.value == null ? 0 : 1);
+            CoreUtils.SetKeyword(material, GROUND_EMISSION_TEXTURE, pbrSky.groundEmissionTexture.value != null);
             material.SetTexture(_GroundEmissionTexture, pbrSky.groundEmissionTexture.value);
             material.SetFloat(_GroundEmissionMultiplier, pbrSky.groundEmissionMultiplier.value);
 
-            material.SetInteger(_HasSpaceEmissionTexture, pbrSky.spaceEmissionTexture.value == null ? 0 : 1);
+            CoreUtils.SetKeyword(material, SPACE_EMISSION_TEXTURE, pbrSky.spaceEmissionTexture.value != null);
             material.SetTexture(_SpaceEmissionTexture, pbrSky.spaceEmissionTexture.value);
             material.SetFloat(_SpaceEmissionMultiplier, pbrSky.spaceEmissionMultiplier.value);
 

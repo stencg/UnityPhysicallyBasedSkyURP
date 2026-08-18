@@ -56,10 +56,6 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                 return output;
             }
 
-            int _HasGroundAlbedoTexture;    // bool...
-            int _HasGroundEmissionTexture;  // bool...
-            int _HasSpaceEmissionTexture;   // bool...
-
             half _GroundEmissionMultiplier;
             half _SpaceEmissionMultiplier;
 
@@ -69,6 +65,9 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
             #pragma multi_compile_local_fragment _ LOCAL_SKY
             #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
+            #pragma multi_compile_local_fragment _ _GROUND_ALBEDO_TEXTURE
+            #pragma multi_compile_local_fragment _ _GROUND_EMISSION_TEXTURE
+            #pragma multi_compile_local_fragment _ _SPACE_EMISSION_TEXTURE
 
             #pragma multi_compile_fragment _ SKY_NOT_BAKING
 
@@ -135,20 +134,16 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                         float3 gP = O + tGround * -V;
                         half3 gN = normalize(gP);
 
-                        UNITY_BRANCH
-                        if (_HasGroundEmissionTexture)
-                        {
-                            half4 ts = SAMPLE_TEXTURECUBE(_GroundEmissionTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation));
-                            radiance += _GroundEmissionMultiplier * ts.rgb;
-                        }
+                    #if defined(_GROUND_EMISSION_TEXTURE)
+                        half4 ts = SAMPLE_TEXTURECUBE(_GroundEmissionTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation));
+                        radiance += _GroundEmissionMultiplier * ts.rgb;
+                    #endif
 
                         half3 albedo = _GroundAlbedo.xyz;
 
-                        UNITY_BRANCH
-                        if (_HasGroundAlbedoTexture)
-                        {
-                            albedo *= SAMPLE_TEXTURECUBE(_GroundAlbedoTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation)).rgb;
-                        }
+                    #if defined(_GROUND_ALBEDO_TEXTURE)
+                        albedo *= SAMPLE_TEXTURECUBE(_GroundAlbedoTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation)).rgb;
+                    #endif
 
                         half3 gBrdf = INV_PI * albedo;
 
@@ -191,13 +186,11 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                 }
                 else if (tFrag == FLT_INF) // See the stars?
                 {
-                    UNITY_BRANCH
-                    if (_HasSpaceEmissionTexture)
-                    {
+                #if defined(_SPACE_EMISSION_TEXTURE)
                         // V points towards the camera.
                         half4 ts = SAMPLE_TEXTURECUBE(_SpaceEmissionTexture, s_trilinear_clamp_sampler, mul(-V, (half3x3)_SpaceRotation));
                         radiance += _SpaceEmissionMultiplier * DecodeHDREnvironment(ts, _SpaceEmissionTexture_HDR);
-                    }
+                #endif
                 }
 
                 float3 skyColor = 0, skyOpacity = 0;
@@ -276,10 +269,6 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                 return output;
             }
 
-            int _HasGroundAlbedoTexture;    // bool...
-            int _HasGroundEmissionTexture;  // bool...
-            int _HasSpaceEmissionTexture;   // bool...
-
             half _GroundEmissionMultiplier;
             half _SpaceEmissionMultiplier;
 
@@ -289,6 +278,9 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
             #pragma multi_compile_local_fragment _ LOCAL_SKY
             #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
+            #pragma multi_compile_local_fragment _ _GROUND_ALBEDO_TEXTURE
+            #pragma multi_compile_local_fragment _ _GROUND_EMISSION_TEXTURE
+            #pragma multi_compile_local_fragment _ _SPACE_EMISSION_TEXTURE
 
             TEXTURECUBE(_GroundAlbedoTexture);
             TEXTURECUBE(_GroundEmissionTexture);
@@ -345,20 +337,16 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                         float3 gP = O + tGround * -V;
                         half3 gN = normalize(gP);
 
-                        UNITY_BRANCH
-                        if (_HasGroundEmissionTexture)
-                        {
-                            half4 ts = SAMPLE_TEXTURECUBE(_GroundEmissionTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation));
-                            radiance += _GroundEmissionMultiplier * ts.rgb;
-                        }
+                    #if defined(_GROUND_EMISSION_TEXTURE)
+                        half4 ts = SAMPLE_TEXTURECUBE(_GroundEmissionTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation));
+                        radiance += _GroundEmissionMultiplier * ts.rgb;
+                    #endif
 
                         half3 albedo = _GroundAlbedo.xyz;
 
-                        UNITY_BRANCH
-                        if (_HasGroundAlbedoTexture)
-                        {
-                            albedo *= SAMPLE_TEXTURECUBE(_GroundAlbedoTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation)).rgb;
-                        }
+                    #if defined(_GROUND_ALBEDO_TEXTURE)
+                        albedo *= SAMPLE_TEXTURECUBE(_GroundAlbedoTexture, s_trilinear_clamp_sampler, mul(gN, (half3x3)_PlanetRotation)).rgb;
+                    #endif
 
                         half3 gBrdf = INV_PI * albedo;
 
@@ -401,13 +389,11 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
                 }
                 else if (tFrag == FLT_INF) // See the stars?
                 {
-                    UNITY_BRANCH
-                    if (_HasSpaceEmissionTexture)
-                    {
+                #if defined(_SPACE_EMISSION_TEXTURE)
                         // V points towards the camera.
                         half4 ts = SAMPLE_TEXTURECUBE(_SpaceEmissionTexture, s_trilinear_clamp_sampler, mul(-V, (half3x3)_SpaceRotation));
                         radiance += _SpaceEmissionMultiplier * DecodeHDREnvironment(ts, _SpaceEmissionTexture_HDR);
-                    }
+                #endif
                 }
 
                 float3 skyColor = 0, skyOpacity = 0;
