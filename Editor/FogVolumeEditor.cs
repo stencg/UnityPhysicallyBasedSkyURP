@@ -31,7 +31,7 @@ class FogEditor : VolumeComponentEditor
     SerializedDataParameter m_UnderWater;
     SerializedDataParameter m_WaterHeight;
 
-    static GUIContent s_Enabled = new GUIContent("State", "When set to Enabled, URP renders fog in your scene.");
+    static GUIContent s_Enabled = new GUIContent("State", "When set to Enabled, URP renders fog in your scene and the renderer feature requests a camera depth texture.");
     //static GUIContent s_AlbedoLabel = new GUIContent("Albedo", "Specifies the color this fog scatters light to.");
     static GUIContent s_MeanFreePathLabel = new GUIContent("Fog Attenuation Distance", "Controls the density at the base level (per color channel). Distance at which fog reduces background light intensity by 63%. Units: m.");
     static GUIContent s_BaseHeightLabel = new GUIContent("Base Height", "Reference height (e.g. sea level). Sets the height of the boundary between the constant and exponential fog. Units: m.");

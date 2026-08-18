@@ -41,7 +41,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     [Header("Performance")]
     [Tooltip("The precomputation quality of physically based sky.")]
     [SerializeField] private PrecomputationQualityMode m_Precomputation = PrecomputationQualityMode.High;
-    [Tooltip("Smooths fog only where opaque geometry meets the sky. Reduces aliased fog lines at distant geometry silhouettes.")]
+    [Tooltip("Smooths fog only where opaque geometry meets the sky. Reduces aliased fog lines at distant geometry silhouettes. Active Fog requires a camera depth texture.")]
     [SerializeField] private bool m_FogDepthEdgeAntialiasing = false;
 
     private bool isShaderMismatchLogPrinted;
@@ -1823,7 +1823,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             if (isFogEnabled)
                 UpdateFogProperties(renderingData.cameraData.camera);
 
-            ConfigureInput(ScriptableRenderPassInput.Depth);
+            bool requiresDepth = isFogEnabled || (pbrSky != null && pbrSky.atmosphericScattering.value);
+            ConfigureInput(requiresDepth ? ScriptableRenderPassInput.Depth : ScriptableRenderPassInput.None);
         }
 
     #if UNITY_6000_0_OR_NEWER
@@ -1899,7 +1900,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.cameraColorHandle = resourceData.activeColorTexture;
                 passData.enableFog = isFogEnabled;
 
-                ConfigureInput(ScriptableRenderPassInput.Depth);
+                bool requiresDepth = isFogEnabled || (pbrSky != null && pbrSky.atmosphericScattering.value);
+                ConfigureInput(requiresDepth ? ScriptableRenderPassInput.Depth : ScriptableRenderPassInput.None);
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);

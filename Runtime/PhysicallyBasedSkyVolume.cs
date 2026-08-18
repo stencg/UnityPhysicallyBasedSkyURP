@@ -86,7 +86,7 @@ public class PhysicallyBasedSky : VolumeComponent, IPostProcessComponent
     public PhysicallyBasedSkyModelParameter type = new(PhysicallyBasedSkyModel.EarthAdvanced);
 
     /// <summary> Enable atmopsheric scattering on opaque objects.</summary>
-    [Tooltip("Enables atmospheric attenuation on opaque objects when viewed from a distance. This is responsible for the blue tint on distant montains or clouds.")]
+    [Tooltip("Enables atmospheric attenuation on opaque objects when viewed from a distance. This is responsible for the blue tint on distant montains or clouds and requires a camera depth texture.")]
     public BoolParameter atmosphericScattering = new BoolParameter(true);
 
     /// <summary> The material used for sky rendering. </summary>

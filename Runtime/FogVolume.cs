@@ -16,7 +16,7 @@ using UnityEngine.Rendering.Universal;
 public class Fog : VolumeComponent, IPostProcessComponent
 {
     /// <summary>Enable fog.</summary>
-    [Tooltip("Enables the fog.")]
+    [Tooltip("Enables fog and requires the renderer feature to request a camera depth texture.")]
     public BoolParameter enabled = new BoolParameter(false, BoolParameter.DisplayType.EnumPopup);
     /// <summary>Fog color mode.</summary>
     [Tooltip("Specifies the color mode of the fog.")]
