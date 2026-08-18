@@ -2136,6 +2136,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private const string _GlossyEnvironmentCubeMap = "_GlossyEnvironmentCubeMap";
         private const string _SkyTexture = "_SkyTexture";
+        private const string k_VolumetricCloudsEnvironmentPassName = "Volumetric Clouds Update Environment";
 
         private const string VOLUMETRIC_CLOUDS = "VOLUMETRIC_CLOUDS";
         private const string STEREO_INSTANCING_ON = "STEREO_INSTANCING_ON";
@@ -2179,6 +2180,13 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             cloudsMaterial = material;
         }
 
+        private static int GetVolumetricCloudsEnvironmentPass(Material material)
+        {
+            return material != null && Shader.IsKeywordEnabled(VOLUMETRIC_CLOUDS)
+                ? material.FindPass(k_VolumetricCloudsEnvironmentPassName)
+                : -1;
+        }
+
         #region Non Render Graph Pass
 // Unity 6.4 removed the compatibility-mode ScriptableRenderPass callbacks and
 // target configuration APIs. Use the Render Graph implementation below there.
@@ -2200,7 +2208,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             desc.depthBufferBits = 0;
             desc.useDynamicScale = false;
 
-            bool hasVolumetricClouds = cloudsMaterial != null && Shader.IsKeywordEnabled(VOLUMETRIC_CLOUDS);
+            bool hasVolumetricClouds = GetVolumetricCloudsEnvironmentPass(cloudsMaterial) >= 0;
 
         #if UNITY_6000_0_OR_NEWER
             RenderingUtils.ReAllocateHandleIfNeeded(ref probeColorHandle, desc, FilterMode.Trilinear, TextureWrapMode.Clamp, name: _GlossyEnvironmentCubeMap);
@@ -2246,7 +2254,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 cmd.SetGlobalVector(scaledScreenParams, skyViewScreenParams);
                 cmd.SetGlobalVector(screenSize, skyViewScreenSize);
 
-                bool hasVolumetricClouds = cloudsMaterial != null && Shader.IsKeywordEnabled(VOLUMETRIC_CLOUDS);
+                int volumetricCloudsEnvironmentPass = GetVolumetricCloudsEnvironmentPass(cloudsMaterial);
+                bool hasVolumetricClouds = volumetricCloudsEnvironmentPass >= 0;
 
                 for (int i = 0; i < 6; i++)
                 {
@@ -2297,7 +2306,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                         cmd.SetGlobalMatrix(unity_MatrixInvVP, skyMatrixVP.inverse);
 
                         CoreUtils.SetRenderTarget(cmd, probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
-                        Blitter.BlitTexture(cmd, probeColorHandle, m_ScaleBias, cloudsMaterial, pass: 8);
+                        Blitter.BlitTexture(cmd, probeColorHandle, m_ScaleBias, cloudsMaterial, pass: volumetricCloudsEnvironmentPass);
                     }
                 }
 
@@ -2351,6 +2360,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal bool isPbrSky;
             internal bool hasVolumetricClouds;
             internal bool isStereoEnabled;
+            internal int volumetricCloudsEnvironmentPass;
 
             internal int skyTextureMipCounts;
         }
@@ -2411,7 +2421,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                     context.cmd.SetGlobalMatrix(unity_MatrixInvVP, skyMatrixVP.inverse);
 
                     CoreUtils.SetRenderTarget(cmd, data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
-                    Blitter.BlitTexture(cmd, data.probeColorHandle, m_ScaleBias, data.cloudsMaterial, pass: 8);
+                    Blitter.BlitTexture(cmd, data.probeColorHandle, m_ScaleBias, data.cloudsMaterial, pass: data.volumetricCloudsEnvironmentPass);
                 }
             }
 
@@ -2448,7 +2458,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
                 UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 
-                bool hasVolumetricClouds = cloudsMaterial != null && Shader.IsKeywordEnabled(VOLUMETRIC_CLOUDS);
+                int volumetricCloudsEnvironmentPass = GetVolumetricCloudsEnvironmentPass(cloudsMaterial);
+                bool hasVolumetricClouds = volumetricCloudsEnvironmentPass >= 0;
 
                 RenderTextureDescriptor desc = cameraData.cameraTargetDescriptor;
 
@@ -2506,6 +2517,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.isPbrSky = isPbrSky;
                 passData.hasVolumetricClouds = hasVolumetricClouds;
                 passData.isStereoEnabled = cameraData.camera.stereoEnabled;
+                passData.volumetricCloudsEnvironmentPass = volumetricCloudsEnvironmentPass;
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 // probeColorHandle is both read (blit source) and written (render target) in ExecutePass
