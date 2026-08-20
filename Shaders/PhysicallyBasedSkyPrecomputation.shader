@@ -614,8 +614,6 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
             struct CustomVaryings
             {
                 float4 positionCS : SV_POSITION;
-                float2 texcoord : TEXCOORD0;
-                float3 positionWS : TEXCOORD1;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -626,15 +624,8 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
 
                 float4 pos = GetFullScreenTriangleVertexPosition(input.vertexID);
-                float2 uv = GetFullScreenTriangleTexCoord(input.vertexID);
 
                 output.positionCS = pos;
-            #if UNITY_VERSION < 202320
-                output.texcoord = uv * _BlitScaleBias.xy + _BlitScaleBias.zw;
-            #else
-                output.texcoord = DYNAMIC_SCALING_APPLY_SCALEBIAS(uv);
-            #endif
-                output.positionWS = ComputeWorldSpacePosition(output.texcoord, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP);
 
                 return output;
             }
@@ -642,13 +633,11 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
             half4 frag(CustomVaryings input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
-                float2 screenUV = input.texcoord.xy;
-                int2 pixelCoords = int2(screenUV * _ScreenResolution.xy);
+                int2 pixelCoords = int2(input.positionCS.xy);
 
-                float3 V = normalize(GetCameraPositionWS() - input.positionWS);
                 float depth = LOAD_TEXTURE2D_X_LOD(_CameraDepthTexture, pixelCoords, 0).r;
-                //float depth = SAMPLE_TEXTURE2D_X_LOD(_CameraDepthTexture, s_point_clamp_sampler, screenUV, 0).r;
                 PositionInputs posInput = GetPositionInput(input.positionCS.xy, _ScreenResolution.zw, depth, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+                float3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
 
                 half3 volColor, volOpacity = 0.0;
                 EvaluateAtmosphericScattering(posInput, V, volColor, volOpacity);

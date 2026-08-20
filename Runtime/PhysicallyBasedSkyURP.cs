@@ -742,6 +742,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal Vector3 mainLightColor;
             internal bool enableAtmosphericScattering;
             internal bool isReflectionCamera;
+            internal CameraAtmosphereData cameraAtmosphereData;
         }
 
         // This static method is used to execute the pass and passed as the RenderFunc delegate to the RenderGraph render pass
@@ -754,6 +755,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             cmd.EnableShaderKeyword(PHYSICALLY_BASED_SKY);
             cmd.EnableShaderKeyword(SKY_NOT_BAKING);
             cmd.SetGlobalFloat(_EnableAtmosphericScattering, data.enableAtmosphericScattering ? 1.0f : 0.0f);
+            cmd.SetGlobalVector(_PBRSkyCameraPosPS, data.cameraAtmosphereData.cameraPositionPS);
+            cmd.SetGlobalVector(_PlanetCenterRadius, data.cameraAtmosphereData.planetCenterRadius);
+            cmd.SetGlobalVector(_PlanetUpAltitude, data.cameraAtmosphereData.planetUpAltitude);
         }
 
         // This is where the renderGraph handle can be accessed.
@@ -792,6 +796,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.mainLightColor = mainLightColor;
                 passData.enableAtmosphericScattering = pbrSky.atmosphericScattering.value;
                 passData.isReflectionCamera = cameraData.camera.cameraType == CameraType.Reflection;
+                passData.cameraAtmosphereData = GetCameraAtmosphereData(camera);
 
                 builder.AllowGlobalStateModification(true);
 
@@ -865,9 +870,38 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             return ambientProbe;
         }
 
+        internal struct CameraAtmosphereData
+        {
+            internal Vector4 cameraPositionPS;
+            internal Vector4 planetCenterRadius;
+            internal Vector4 planetUpAltitude;
+        }
+
+        private CameraAtmosphereData GetCameraAtmosphereData(Camera camera)
+        {
+            Vector3 cameraPosition = camera.transform.position;
+            float4 planetCenterRadius = visualEnvironment.GetPlanetCenterRadius(cameraPosition);
+            float planetRadius = planetCenterRadius.w;
+            Vector3 planetCenter = planetCenterRadius.xyz;
+            Vector3 planetUp = (cameraPosition - planetCenter).normalized;
+            float cameraAltitude = Vector3.Dot(cameraPosition - (planetUp * planetRadius + planetCenter), planetUp);
+            Vector3 cameraPositionPS = cameraPosition - planetCenter;
+
+            if (cameraAltitude < 1.0f)
+                cameraPositionPS -= (cameraAltitude - 1.0f) * planetUp;
+
+            return new CameraAtmosphereData
+            {
+                cameraPositionPS = cameraPositionPS,
+                planetCenterRadius = planetCenterRadius,
+                planetUpAltitude = new Vector4(planetUp.x, planetUp.y, planetUp.z, cameraAltitude)
+            };
+        }
+
         private void UpdateMaterialProperties(Light mainLight, Camera camera, Material material)
         {
-            float4 planetCenterRadius = visualEnvironment.GetPlanetCenterRadius(camera.transform.position);
+            CameraAtmosphereData cameraAtmosphereData = GetCameraAtmosphereData(camera);
+            float4 planetCenterRadius = cameraAtmosphereData.planetCenterRadius;
 
             float R = planetCenterRadius.w;
             float D = pbrSky.GetMaximumAltitude();
@@ -917,22 +951,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             Shader.SetGlobalVector(_ZenithTint, new Vector3(pbrSky.zenithTint.value.r, pbrSky.zenithTint.value.g, pbrSky.zenithTint.value.b));
             Shader.SetGlobalFloat(_HorizonZenithShiftScale, expParams.y);
 
-            var cameraPos = camera.transform.position;
-            Vector3 planetCenter = planetCenterRadius.xyz;
-            var planetPosRWS = planetCenter - cameraPos;
-
-            // This is not very efficient but necessary for precision
-            var planetUp = -planetPosRWS.normalized;
-            var cameraHeight = Vector3.Dot(cameraPos - (planetUp * R + planetCenter), planetUp);
-            float4 upAltitude = float4(planetUp, cameraHeight);
-            Vector3 cameraPosPS = cameraPos - planetCenter;
-            if (upAltitude.w < 1.0f) // Ensure camera is not below the ground
-                cameraPosPS -= (upAltitude.w - 1.0f) * (Vector3)upAltitude.xyz;
-
-            Shader.SetGlobalVector(_PBRSkyCameraPosPS, cameraPosPS);
-
+            Shader.SetGlobalVector(_PBRSkyCameraPosPS, cameraAtmosphereData.cameraPositionPS);
             Shader.SetGlobalVector(_PlanetCenterRadius, planetCenterRadius);
-            Shader.SetGlobalVector(_PlanetUpAltitude, upAltitude);
+            Shader.SetGlobalVector(_PlanetUpAltitude, cameraAtmosphereData.planetUpAltitude);
 
             var renderingSpace = visualEnvironment.renderingSpace.value;
             CoreUtils.SetKeyword(material, LOCAL_SKY, renderingSpace == VisualEnvironment.RenderingSpace.World);
@@ -1865,6 +1886,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             internal TextureHandle cameraColorHandle;
             internal bool enableFog;
+            internal Vector2Int screenResolution;
         }
 
         // This static method is used to execute the pass and passed as the RenderFunc delegate to the RenderGraph render pass
@@ -1872,8 +1894,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
-            if (data.cameraColorHandle.IsValid())
-                CalculateActualScreenResolution(cmd, data.cameraColorHandle);
+            SetScreenResolution(cmd, data.screenResolution.x, data.screenResolution.y);
 
             cmd.SetGlobalInteger(_FogEnabled, data.enableFog ? 1 : 0);
 
@@ -1899,6 +1920,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.lutMaterial = lutMaterial;
                 passData.cameraColorHandle = resourceData.activeColorTexture;
                 passData.enableFog = isFogEnabled;
+                passData.screenResolution = new Vector2Int(cameraData.cameraTargetDescriptor.width, cameraData.cameraTargetDescriptor.height);
 
                 bool requiresDepth = isFogEnabled || (pbrSky != null && pbrSky.atmosphericScattering.value);
                 ConfigureInput(requiresDepth ? ScriptableRenderPassInput.Depth : ScriptableRenderPassInput.None);
@@ -1993,23 +2015,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         static void CalculateActualScreenResolution(CommandBuffer cmd, RTHandle cameraTargetHandle)
         {
-            float width = cameraTargetHandle.rt.width;
-            float height = cameraTargetHandle.rt.height;
-            if (cameraTargetHandle.rt.useDynamicScale)
-            {
-             #if ENABLE_VR && ENABLE_XR_MODULE
-                if (cameraTargetHandle.rt.vrUsage != VRTextureUsage.None)
-                {
-                    width = XRSystem.ScaleTextureWidthForXR(cameraTargetHandle.rt);
-                    height = XRSystem.ScaleTextureHeightForXR(cameraTargetHandle.rt);
-                }
-                else
-            #endif
-                {
-                    width *= ScalableBufferManager.widthScaleFactor;
-                    height *= ScalableBufferManager.heightScaleFactor;
-                }
-            }
+            Vector2Int viewportSize = cameraTargetHandle.GetScaledSize(cameraTargetHandle.rtHandleProperties.currentViewportSize);
+            SetScreenResolution(cmd, viewportSize.x, viewportSize.y);
+        }
+
+        static void SetScreenResolution(CommandBuffer cmd, float width, float height)
+        {
             cmd.SetGlobalVector(_ScreenResolution, new Vector4(width, height, 1.0f / width, 1.0f / height));
         }
         #endregion
