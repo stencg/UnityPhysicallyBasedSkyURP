@@ -205,6 +205,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
                 skyColor += radiance * (1 - skyOpacity);
                 skyColor *= _IntensityMultiplier;
+                ApplyAtmosphericScatteringToSky(V, screenUV, skyColor);
 
                 return float4(skyColor, 1.0);
             }
@@ -408,6 +409,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
                 skyColor += radiance * (1 - skyOpacity);
                 skyColor *= _IntensityMultiplier;
+                ApplyAtmosphericScatteringToSky(V, screenUV, skyColor);
 
                 return float4(skyColor, 1.0);
             }

@@ -588,6 +588,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Sampling/Hammersley.hlsl"
 
             #include "./PhysicallyBasedSkyRendering.hlsl"
+            #define OPAQUE_FOG_PASS
             #include "./AtmosphericScattering.hlsl"
 
             #pragma vertex vert
@@ -601,8 +602,6 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
 
             #pragma multi_compile_fragment _ PHYSICALLY_BASED_SKY
             #pragma multi_compile_fragment _ DEBUG_DISPLAY
-
-            #define OPAQUE_FOG_PASS
 
             // "_ScreenSize" that supports dynamic resolution
             float4 _ScreenResolution;

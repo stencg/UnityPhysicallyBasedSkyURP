@@ -285,10 +285,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         m_AtmosphericScatteringPass ??= new AtmosphericScatteringPass(m_PbrSkyLUTMaterial)
         {
-            // Cloud and other sky effects render immediately before transparents. Apply the
-            // fullscreen fog afterwards so those effects receive fog without fogging opaque
-            // geometry twice, while still leaving transparent objects to their material fog.
-            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents + 1
+            // Scatter opaque geometry before clouds are composited. Volumetric clouds apply
+            // atmospheric scattering separately in their combine pass using cloud depth.
+            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents - 1
         };
 
         m_AtmosphericScatteringPass.lutMaterial = m_PbrSkyLUTMaterial;
@@ -364,7 +363,10 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             }
 
             if (hasFog && renderingData.cameraData.camera.cameraType != CameraType.Reflection)
+            {
+                m_AtmosphericScatteringPass.ConfigureInput(ScriptableRenderPassInput.Depth);
                 renderer.EnqueuePass(m_AtmosphericScatteringPass);
+            }
             
             renderer.EnqueuePass(m_PBSkyPostPass);
         }
@@ -1826,9 +1828,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         // "_ScreenSize" that supports dynamic resolution
         private static readonly int _ScreenResolution = Shader.PropertyToID("_ScreenResolution");
 
+        private readonly LocalKeyword m_FogDepthEdgeAntialiasingKeyword;
+
         public AtmosphericScatteringPass(Material lutMaterial)
         {
             this.lutMaterial = lutMaterial;
+            m_FogDepthEdgeAntialiasingKeyword = new LocalKeyword(lutMaterial.shader, k_FogDepthEdgeAntialiasingKeywordName);
         }
 
         #region Non Render Graph Pass
@@ -1842,10 +1847,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             bool isFogEnabled = fog != null && fog.IsActive();
             if (isFogEnabled)
-                UpdateFogProperties(renderingData.cameraData.camera);
+                SetFogProperties(cmd, GetFogProperties(renderingData.cameraData.camera));
 
-            bool requiresDepth = isFogEnabled || (pbrSky != null && pbrSky.atmosphericScattering.value);
-            ConfigureInput(requiresDepth ? ScriptableRenderPassInput.Depth : ScriptableRenderPassInput.None);
+            cmd.SetKeyword(lutMaterial, m_FogDepthEdgeAntialiasingKeyword, isFogEnabled && fogDepthEdgeAntialiasing);
         }
 
     #if UNITY_6000_0_OR_NEWER
@@ -1886,6 +1890,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             internal TextureHandle cameraColorHandle;
             internal bool enableFog;
+            internal bool fogDepthEdgeAntialiasing;
+            internal LocalKeyword fogDepthEdgeAntialiasingKeyword;
+            internal FogProperties fogProperties;
             internal Vector2Int screenResolution;
         }
 
@@ -1897,6 +1904,10 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             SetScreenResolution(cmd, data.screenResolution.x, data.screenResolution.y);
 
             cmd.SetGlobalInteger(_FogEnabled, data.enableFog ? 1 : 0);
+            cmd.SetKeyword(data.lutMaterial, data.fogDepthEdgeAntialiasingKeyword, data.enableFog && data.fogDepthEdgeAntialiasing);
+
+            if (data.enableFog)
+                SetFogProperties(cmd, data.fogProperties);
 
             Blitter.BlitCameraTexture(cmd, data.cameraColorHandle, data.cameraColorHandle, RenderBufferLoadAction.Load, RenderBufferStoreAction.Store, data.lutMaterial, pass: 4);
         }
@@ -1914,16 +1925,14 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 
                 bool isFogEnabled = fog != null && fog.IsActive();
-                if (isFogEnabled)
-                    UpdateFogProperties(cameraData.camera);
 
                 passData.lutMaterial = lutMaterial;
                 passData.cameraColorHandle = resourceData.activeColorTexture;
                 passData.enableFog = isFogEnabled;
+                passData.fogDepthEdgeAntialiasing = fogDepthEdgeAntialiasing;
+                passData.fogDepthEdgeAntialiasingKeyword = m_FogDepthEdgeAntialiasingKeyword;
+                passData.fogProperties = isFogEnabled ? GetFogProperties(cameraData.camera) : default;
                 passData.screenResolution = new Vector2Int(cameraData.cameraTargetDescriptor.width, cameraData.cameraTargetDescriptor.height);
-
-                bool requiresDepth = isFogEnabled || (pbrSky != null && pbrSky.atmosphericScattering.value);
-                ConfigureInput(requiresDepth ? ScriptableRenderPassInput.Depth : ScriptableRenderPassInput.None);
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
@@ -1944,7 +1953,24 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         }
 
-        public void UpdateFogProperties(Camera camera)
+        private struct FogProperties
+        {
+            internal float maxFogDistance;
+            internal float fogColorMode;
+            internal Vector4 fogColor;
+            internal Vector4 mipFogParameters;
+            internal Vector4 heightFogBaseScattering;
+            internal float heightFogBaseExtinction;
+            internal Vector4 planetUpAltitude;
+            internal float heightFogBaseHeight;
+            internal Vector4 heightFogExponents;
+            internal float underWaterEnabled;
+            internal float fogWaterHeight;
+            internal bool useFogAmbientProbe;
+            internal SphericalHarmonicsL2 fogAmbientProbe;
+        }
+
+        private FogProperties GetFogProperties(Camera camera)
         {
             var cameraPos = camera.transform.position;
 
@@ -1957,47 +1983,65 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             // This is not very efficient but necessary for precision
             var planetUp = -planetPosRWS.normalized;
             var cameraHeight = Vector3.Dot(cameraPos - (planetUp * R + planetCenter), planetUp);
-            float4 upAltitude = float4(planetUp, cameraHeight);
-
-            Shader.SetGlobalInteger(_FogEnabled, 1);
-            CoreUtils.SetKeyword(lutMaterial, k_FogDepthEdgeAntialiasingKeywordName, fogDepthEdgeAntialiasing);
-            Shader.SetGlobalFloat(_MaxFogDistance, fog.maxFogDistance.value);
+            Vector4 upAltitude = new Vector4(planetUp.x, planetUp.y, planetUp.z, cameraHeight);
 
             Color fogColor = (fog.colorMode.value == Fog.FogColorMode.ConstantColor) ? fog.color.value : fog.tint.value;
-            Shader.SetGlobalFloat(_FogColorMode, (float)fog.colorMode.value);
-            Shader.SetGlobalVector(_FogColor, new Color(fogColor.r, fogColor.g, fogColor.b, 0.0f));
-            Shader.SetGlobalVector(_MipFogParameters, new Vector4(fog.mipFogNear.value, fog.mipFogFar.value, fog.mipFogMaxMip.value, 0.0f));
-
-            if (fog.colorMode.value == Fog.FogColorMode.SkyColor && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static)
-                SetFogAmbientProbe(RenderSettings.ambientProbe);
 
             // When volumetric fog is disabled, we don't want its color to affect the heightfog. So we pass neutral values here.
             var extinction = ExtinctionFromMeanFreePath(fog.meanFreePath.value);
-            Shader.SetGlobalVector(_HeightFogBaseScattering, Vector4.one * extinction);
-            Shader.SetGlobalFloat(_HeightFogBaseExtinction, extinction);
 
             float crBaseHeight = fog.baseHeight.value;
-            Shader.SetGlobalVector(_PlanetUpAltitude, upAltitude);
-            Shader.SetGlobalFloat(_HeightFogBaseHeight, crBaseHeight - upAltitude.w);
 
             float layerDepth = Mathf.Max(0.01f, fog.maximumHeight.value - fog.baseHeight.value);
             float H = ScaleHeightFromLayerDepth(layerDepth);
-            Shader.SetGlobalVector(_HeightFogExponents, new Vector2(1.0f / H, H));
-            //_GlobalFogAnisotropy = anisotropy.value;
 
-            Shader.SetGlobalFloat(_UnderWaterEnabled, fog.underWater.value ? 1.0f : 0.0f);
-            Shader.SetGlobalFloat(_FogWaterHeight, fog.waterHeight.value);
+            bool useFogAmbientProbe = fog.colorMode.value == Fog.FogColorMode.SkyColor && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static;
+
+            return new FogProperties
+            {
+                maxFogDistance = fog.maxFogDistance.value,
+                fogColorMode = (float)fog.colorMode.value,
+                fogColor = new Vector4(fogColor.r, fogColor.g, fogColor.b, 0.0f),
+                mipFogParameters = new Vector4(fog.mipFogNear.value, fog.mipFogFar.value, fog.mipFogMaxMip.value, 0.0f),
+                heightFogBaseScattering = Vector4.one * extinction,
+                heightFogBaseExtinction = extinction,
+                planetUpAltitude = upAltitude,
+                heightFogBaseHeight = crBaseHeight - upAltitude.w,
+                heightFogExponents = new Vector4(1.0f / H, H, 0.0f, 0.0f),
+                underWaterEnabled = fog.underWater.value ? 1.0f : 0.0f,
+                fogWaterHeight = fog.waterHeight.value,
+                useFogAmbientProbe = useFogAmbientProbe,
+                fogAmbientProbe = useFogAmbientProbe ? RenderSettings.ambientProbe : default
+            };
         }
 
-        private static void SetFogAmbientProbe(SphericalHarmonicsL2 ambientProbe)
+        private static void SetFogProperties(CommandBuffer cmd, FogProperties properties)
         {
-            Shader.SetGlobalVector(_FogSHAr, new Vector4(ambientProbe[0, 3], ambientProbe[0, 1], ambientProbe[0, 2], ambientProbe[0, 0] - ambientProbe[0, 6]));
-            Shader.SetGlobalVector(_FogSHAg, new Vector4(ambientProbe[1, 3], ambientProbe[1, 1], ambientProbe[1, 2], ambientProbe[1, 0] - ambientProbe[1, 6]));
-            Shader.SetGlobalVector(_FogSHAb, new Vector4(ambientProbe[2, 3], ambientProbe[2, 1], ambientProbe[2, 2], ambientProbe[2, 0] - ambientProbe[2, 6]));
-            Shader.SetGlobalVector(_FogSHBr, new Vector4(ambientProbe[0, 4], ambientProbe[0, 5], ambientProbe[0, 6] * 3.0f, ambientProbe[0, 7]));
-            Shader.SetGlobalVector(_FogSHBg, new Vector4(ambientProbe[1, 4], ambientProbe[1, 5], ambientProbe[1, 6] * 3.0f, ambientProbe[1, 7]));
-            Shader.SetGlobalVector(_FogSHBb, new Vector4(ambientProbe[2, 4], ambientProbe[2, 5], ambientProbe[2, 6] * 3.0f, ambientProbe[2, 7]));
-            Shader.SetGlobalVector(_FogSHC, new Vector4(ambientProbe[0, 8], ambientProbe[1, 8], ambientProbe[2, 8], 1.0f));
+            cmd.SetGlobalFloat(_MaxFogDistance, properties.maxFogDistance);
+            cmd.SetGlobalFloat(_FogColorMode, properties.fogColorMode);
+            cmd.SetGlobalVector(_FogColor, properties.fogColor);
+            cmd.SetGlobalVector(_MipFogParameters, properties.mipFogParameters);
+            cmd.SetGlobalVector(_HeightFogBaseScattering, properties.heightFogBaseScattering);
+            cmd.SetGlobalFloat(_HeightFogBaseExtinction, properties.heightFogBaseExtinction);
+            cmd.SetGlobalVector(_PlanetUpAltitude, properties.planetUpAltitude);
+            cmd.SetGlobalFloat(_HeightFogBaseHeight, properties.heightFogBaseHeight);
+            cmd.SetGlobalVector(_HeightFogExponents, properties.heightFogExponents);
+            cmd.SetGlobalFloat(_UnderWaterEnabled, properties.underWaterEnabled);
+            cmd.SetGlobalFloat(_FogWaterHeight, properties.fogWaterHeight);
+
+            if (properties.useFogAmbientProbe)
+                SetFogAmbientProbe(cmd, properties.fogAmbientProbe);
+        }
+
+        private static void SetFogAmbientProbe(CommandBuffer cmd, SphericalHarmonicsL2 ambientProbe)
+        {
+            cmd.SetGlobalVector(_FogSHAr, new Vector4(ambientProbe[0, 3], ambientProbe[0, 1], ambientProbe[0, 2], ambientProbe[0, 0] - ambientProbe[0, 6]));
+            cmd.SetGlobalVector(_FogSHAg, new Vector4(ambientProbe[1, 3], ambientProbe[1, 1], ambientProbe[1, 2], ambientProbe[1, 0] - ambientProbe[1, 6]));
+            cmd.SetGlobalVector(_FogSHAb, new Vector4(ambientProbe[2, 3], ambientProbe[2, 1], ambientProbe[2, 2], ambientProbe[2, 0] - ambientProbe[2, 6]));
+            cmd.SetGlobalVector(_FogSHBr, new Vector4(ambientProbe[0, 4], ambientProbe[0, 5], ambientProbe[0, 6] * 3.0f, ambientProbe[0, 7]));
+            cmd.SetGlobalVector(_FogSHBg, new Vector4(ambientProbe[1, 4], ambientProbe[1, 5], ambientProbe[1, 6] * 3.0f, ambientProbe[1, 7]));
+            cmd.SetGlobalVector(_FogSHBb, new Vector4(ambientProbe[2, 4], ambientProbe[2, 5], ambientProbe[2, 6] * 3.0f, ambientProbe[2, 7]));
+            cmd.SetGlobalVector(_FogSHC, new Vector4(ambientProbe[0, 8], ambientProbe[1, 8], ambientProbe[2, 8], 1.0f));
         }
 
         static float ExtinctionFromMeanFreePath(float meanFreePath)
