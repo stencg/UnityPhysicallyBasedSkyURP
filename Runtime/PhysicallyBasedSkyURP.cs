@@ -2191,7 +2191,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private const string _GlossyEnvironmentCubeMap = "_GlossyEnvironmentCubeMap";
         private const string _SkyTexture = "_SkyTexture";
-        private const string k_VolumetricCloudsEnvironmentPassName = "Volumetric Clouds Update Environment";
+        private const string k_VolumetricCloudsEnvironmentPassName = "Volumetric Clouds - Update PBSky Environment";
+        private const string k_LegacyVolumetricCloudsEnvironmentPassName = "Volumetric Clouds Update Environment";
 
         private const string VOLUMETRIC_CLOUDS = "VOLUMETRIC_CLOUDS";
         private const string STEREO_INSTANCING_ON = "STEREO_INSTANCING_ON";
@@ -2237,9 +2238,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private static int GetVolumetricCloudsEnvironmentPass(Material material)
         {
-            return material != null && Shader.IsKeywordEnabled(VOLUMETRIC_CLOUDS)
-                ? material.FindPass(k_VolumetricCloudsEnvironmentPassName)
-                : -1;
+            if (material == null || !Shader.IsKeywordEnabled(VOLUMETRIC_CLOUDS))
+                return -1;
+
+            int pass = material.FindPass(k_VolumetricCloudsEnvironmentPassName);
+            return pass >= 0 ? pass : material.FindPass(k_LegacyVolumetricCloudsEnvironmentPassName);
         }
 
         #region Non Render Graph Pass
@@ -2332,7 +2335,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
                     if (isPbrSky)
                     {
-                        Blitter.BlitTexture(cmd, probeColorHandle, m_ScaleBias, RenderSettings.skybox, pass: 1);
+                        Blitter.BlitTexture(cmd, m_ScaleBias, RenderSettings.skybox, pass: 1);
                     }
                     else
                     {
@@ -2361,7 +2364,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                         cmd.SetGlobalMatrix(unity_MatrixInvVP, skyMatrixVP.inverse);
 
                         CoreUtils.SetRenderTarget(cmd, probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
-                        Blitter.BlitTexture(cmd, probeColorHandle, m_ScaleBias, cloudsMaterial, pass: volumetricCloudsEnvironmentPass);
+                        Blitter.BlitTexture(cmd, m_ScaleBias, cloudsMaterial, pass: volumetricCloudsEnvironmentPass);
                     }
                 }
 
@@ -2450,7 +2453,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 
                 if (data.isPbrSky)
                 {
-                    Blitter.BlitTexture(cmd, data.probeColorHandle, m_ScaleBias, RenderSettings.skybox, pass: 1);
+                    Blitter.BlitTexture(cmd, m_ScaleBias, RenderSettings.skybox, pass: 1);
                 }
                 else
                 {
@@ -2458,7 +2461,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 }
             }
 
-            cmd.SetGlobalTexture(skyTexture, data.hasVolumetricClouds ? data.skyColorHandle : data.probeColorHandle);
             cmd.SetGlobalFloat(skyTextureMipCounts, data.skyTextureMipCounts);
 
             if (data.hasVolumetricClouds)
@@ -2476,11 +2478,10 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                     context.cmd.SetGlobalMatrix(unity_MatrixInvVP, skyMatrixVP.inverse);
 
                     CoreUtils.SetRenderTarget(cmd, data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
-                    Blitter.BlitTexture(cmd, data.probeColorHandle, m_ScaleBias, data.cloudsMaterial, pass: data.volumetricCloudsEnvironmentPass);
+                    Blitter.BlitTexture(cmd, m_ScaleBias, data.cloudsMaterial, pass: data.volumetricCloudsEnvironmentPass);
                 }
             }
 
-            context.cmd.SetGlobalTexture(glossyEnvironmentCubeMap, data.probeColorHandle);
             RenderSettings.defaultReflectionMode = data.isDynamicAmbientMode ? DefaultReflectionMode.Custom : RenderSettings.defaultReflectionMode;
             RenderSettings.customReflectionTexture = data.isDynamicAmbientMode ? data.probeColorHandle : null;
             context.cmd.SetGlobalVector(worldSpaceCameraPos, data.cameraPositionWS);
@@ -2575,11 +2576,16 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.volumetricCloudsEnvironmentPass = volumetricCloudsEnvironmentPass;
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
-                // probeColorHandle is both read (blit source) and written (render target) in ExecutePass
+                // Cloud blending loads the current probe contents before writing the composited result.
                 builder.UseTexture(passData.probeColorHandle, AccessFlags.ReadWrite);
 
                 if (hasVolumetricClouds)
                     builder.UseTexture(passData.skyColorHandle, AccessFlags.ReadWrite);
+
+                builder.SetGlobalTextureAfterPass(
+                    hasVolumetricClouds ? passData.skyColorHandle : passData.probeColorHandle,
+                    skyTexture);
+                builder.SetGlobalTextureAfterPass(passData.probeColorHandle, glossyEnvironmentCubeMap);
 
                 // Sky and cloud materials sample LUTs published by earlier RenderGraph passes.
                 builder.UseAllGlobalTextures(true);

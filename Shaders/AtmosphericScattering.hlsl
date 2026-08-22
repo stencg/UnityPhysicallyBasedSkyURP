@@ -308,17 +308,6 @@ void EvaluateAtmosphericScattering(half3 V, float2 positionNDC, float tFrag, out
 #endif
 }
 
-void ApplyAtmosphericScatteringToSky(float3 V, float2 positionNDC, inout float3 color)
-{
-    if (_PBRFogEnabled)
-    {
-        half3 scatteringColor, scatteringOpacity;
-        // Trace to the atmosphere exit instead of using the Fog volume's finite fallback distance.
-        EvaluateAtmosphericScattering(-V, positionNDC, FLT_INF, scatteringColor, scatteringOpacity);
-        color = scatteringColor + (1.0 - scatteringOpacity) * color;
-    }
-}
-
 // Returns false when fog is not applied
 bool EvaluateAtmosphericScattering(PositionInputs posInput, half3 V, out half3 color, out half3 opacity)
 {
@@ -385,8 +374,7 @@ bool EvaluateAtmosphericScattering(PositionInputs posInput, half3 V, out half3 c
     }
 
 #ifndef ATMOSPHERE_NO_AERIAL_PERSPECTIVE
-    // Sky pass already applies atmospheric scattering to the far plane.
-    // This pass only handles geometry.
+    // The sky shader already evaluates the atmosphere. This pass only handles geometry.
     if (_PBRFogEnabled && !isSky)
     {
         half3 skyColor = 0, skyOpacity = 0;

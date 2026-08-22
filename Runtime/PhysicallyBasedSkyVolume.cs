@@ -85,8 +85,8 @@ public class PhysicallyBasedSky : VolumeComponent, IPostProcessComponent
     [Tooltip("Indicates a preset URP uses to simplify the Inspector.")]
     public PhysicallyBasedSkyModelParameter type = new(PhysicallyBasedSkyModel.EarthAdvanced);
 
-    /// <summary> Enable additional atmospheric scattering on clear sky, opaque objects, and sky effects.</summary>
-    [Tooltip("Enables an additional atmospheric scattering layer on clear sky, distant opaque objects, and sky effects, producing the blue tint on the horizon, distant mountains, and clouds. This feature requests camera depth for opaque-object scattering. Volumetric cloud scattering remains enabled without Volumetric Clouds Output Depth, but enabling it provides physically accurate cloud distance instead of a far-plane approximation.")]
+    /// <summary> Enable atmospheric scattering on opaque objects and compatible effects.</summary>
+    [Tooltip("Enables atmospheric scattering on distant opaque objects and compatible effects such as volumetric clouds, producing the blue tint on distant mountains and clouds. This feature requests camera depth for opaque-object scattering. Volumetric cloud scattering works without Volumetric Clouds Output Depth, but enabling output depth provides physically accurate cloud distance instead of a far-plane approximation.")]
     public BoolParameter atmosphericScattering = new BoolParameter(true);
 
     /// <summary> The material used for sky rendering. </summary>
