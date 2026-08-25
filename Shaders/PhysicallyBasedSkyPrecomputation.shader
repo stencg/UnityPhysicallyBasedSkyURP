@@ -16,6 +16,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
         // Pass 3: Ground Irradiance Precomputation (World Space)
         // Pass 4: Opaque Atmospheric Scattering
         // Pass 5: Precomputed Atmospheric Scattering (Currently Unused)
+        // Pass 6: Static Fog Environment Snapshot
 
         Pass
         {
@@ -880,6 +881,63 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 skyColor += LOAD_TEXTURE2D_LOD(_AtmosphericScatteringSlice, pixelCoords, 0).rgb;
                 
                 return;
+            }
+            ENDHLSL
+        }
+
+        // Pass 6: Static Fog Environment Snapshot
+        // Static mip fog cannot safely sample ReflectionProbe.defaultTexture directly because Unity
+        // may replace or update it while scenes and baked lighting data load. Decode its convolved
+        // mip chain into the package-owned, resolution-capped linear-HDR cubemap used by all cameras.
+        Pass
+        {
+            Name "Static Fog Environment Snapshot"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            HLSLPROGRAM
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Sampling/Sampling.hlsl"
+
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma target 3.5
+
+            TEXTURECUBE(_FogSkyCopySource);
+            float4 _FogSkyCopySource_HDR;
+            float _FogSkyCopyMip;
+            int _FogSkyCopyFace;
+
+            struct StaticFogVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 texcoord : TEXCOORD0;
+                UNITY_VERTEX_OUTPUT_STEREO
+            };
+
+            StaticFogVaryings vert(Attributes input)
+            {
+                StaticFogVaryings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+                float4 positionCS = GetFullScreenTriangleVertexPosition(input.vertexID);
+                float2 uv = GetFullScreenTriangleTexCoord(input.vertexID);
+                output.positionCS = positionCS;
+                output.texcoord = uv;
+                return output;
+            }
+
+            float4 frag(StaticFogVaryings input) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                float3 directionWS = CubemapTexelToDirection(input.texcoord * 2.0 - 1.0, (uint)_FogSkyCopyFace);
+                float4 encodedEnvironment = SAMPLE_TEXTURECUBE_LOD(
+                    _FogSkyCopySource,
+                    sampler_LinearClamp,
+                    directionWS,
+                    _FogSkyCopyMip);
+                return float4(DecodeHDREnvironment(encodedEnvironment, _FogSkyCopySource_HDR), 1.0);
             }
             ENDHLSL
         }

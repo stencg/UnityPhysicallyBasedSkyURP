@@ -19,12 +19,19 @@
 #define FOGCOLORMODE_CONSTANT_COLOR (0)
 #define FOGCOLORMODE_SKY_COLOR (1)
 
+#define FOGSKYSOURCE_DYNAMIC (0)
+#define FOGSKYSOURCE_STATIC (1)
+#define FOGSKYSOURCE_AMBIENT_PROBE (2)
+
 #define _MipFogNear         _MipFogParameters.x
 #define _MipFogFar          _MipFogParameters.y
 #define _MipFogMaxMip       _MipFogParameters.z
 
 TEXTURECUBE(_SkyTexture);
 half _SkyTextureMipCounts;
+TEXTURECUBE(_FogSkyTexture);
+half _FogSkyTextureMipCount;
+half _FogSkySourceMode;
 half4 _FogSHAr;
 half4 _FogSHAg;
 half4 _FogSHAb;
@@ -48,8 +55,9 @@ half3 GetFogColor(half3 V, float fragDist)
     if (_FogColorMode == FOGCOLORMODE_SKY_COLOR)
     {
         // Based on Uncharted 4 "Mip Sky Fog" trick: http://advances.realtimerendering.com/other/2016/naughty_dog/NaughtyDog_TechArt_Final.pdf
-        half mimMip = _SkyTextureMipCounts == 0.0 ? 7.0 - 1.0 : _SkyTextureMipCounts - 1.0;
-        half mipLevel = (1.0 - _MipFogMaxMip * saturate((fragDist - _MipFogNear) / (_MipFogFar - _MipFogNear))) * (mimMip);
+        half mipCount = _FogSkySourceMode == FOGSKYSOURCE_STATIC ? _FogSkyTextureMipCount : _SkyTextureMipCounts;
+        half maxMip = max(0.0, mipCount - 1.0);
+        half mipLevel = (1.0 - _MipFogMaxMip * saturate((fragDist - _MipFogNear) / (_MipFogFar - _MipFogNear))) * maxMip;
         
         //half3 viewColor = SAMPLE_TEXTURECUBE_LOD(_SkyTexture, s_trilinear_clamp_sampler, -V, mipLevel).rgb; // '_FogColor' is the tint
         
@@ -67,11 +75,15 @@ half3 GetFogColor(half3 V, float fragDist)
 
         half3 viewColor;
         UNITY_BRANCH
-        if (_SkyTextureMipCounts == 0.0)
+        if (_FogSkySourceMode == FOGSKYSOURCE_AMBIENT_PROBE)
         {
-            // Static PBR sky publishes its ambient probe directly. Unlike the baked reflection
-            // cubemap, this remains valid after scene loads and ambient-mode changes.
+            // Keep fog valid while Unity loads or regenerates the baked reflection.
             viewColor = max(0.0, EvaluateFogAmbientProbe(-V));
+        }
+        else if (_FogSkySourceMode == FOGSKYSOURCE_STATIC)
+        {
+            // The cached static reflection is already convolved and HDR-decoded.
+            viewColor = SAMPLE_TEXTURECUBE_LOD(_FogSkyTexture, s_trilinear_clamp_sampler, -V, mipLevel).rgb;
         }
         else
         {

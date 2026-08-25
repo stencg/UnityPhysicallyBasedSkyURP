@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Applied opaque atmospheric scattering before volumetric clouds so compatible cloud renderers can fog and scatter clouds at cloud depth without projecting opaque geometry silhouettes through them.
 - Removed a duplicate full-screen atmospheric evaluation that applied scattering to the already-scattered physically based sky.
 - Fixed black Sky Color fog after the volumetric-cloud environment pass rename by removing invalid cubemap self-bindings and tracking the environment textures in RenderGraph.
+- Mip Fog controls in Static ambient mode with a 128px-capped active-scene environment snapshot, SH loading fallback, per-camera RenderGraph bindings, and atomic updates after baked lighting or additive active-scene changes.
 
 
 ## [1.0.9] - 2026-08-16

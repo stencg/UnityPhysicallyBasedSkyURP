@@ -55,6 +55,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     private AtmosphericScatteringPass m_AtmosphericScatteringPass;
     private AmbientProbePass m_AmbientProbePass;
     private PBSkyPostPass m_PBSkyPostPass;
+    private StaticFogSkyCache m_StaticFogSkyCache;
 
     [Header("Sky")]
     [Tooltip("The fallback sky material when physically based sky is disabled.")]
@@ -268,6 +269,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         m_PbrSkyMaterial.name = k_PbrSkyMaterialName;
 
         // Initialize render passes
+        m_StaticFogSkyCache ??= new StaticFogSkyCache();
+        m_StaticFogSkyCache.copyMaterial = m_PbrSkyLUTMaterial;
+
         m_PBSkyPrePass ??= new PBSkyPrePass(m_PbrSkyMaterial, m_CelestialBodyData)
         {
             renderPassEvent = RenderPassEvent.BeforeRenderingPrePasses
@@ -283,7 +287,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         m_SkyViewLUTPass.lutMaterial = m_PbrSkyLUTMaterial;
 
-        m_AtmosphericScatteringPass ??= new AtmosphericScatteringPass(m_PbrSkyLUTMaterial)
+        m_AtmosphericScatteringPass ??= new AtmosphericScatteringPass(m_PbrSkyLUTMaterial, m_StaticFogSkyCache)
         {
             // Scatter opaque geometry before clouds are composited. Volumetric clouds apply
             // atmospheric scattering separately in their combine pass using cloud depth.
@@ -291,6 +295,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         };
 
         m_AtmosphericScatteringPass.lutMaterial = m_PbrSkyLUTMaterial;
+        m_AtmosphericScatteringPass.staticFogSkyCache = m_StaticFogSkyCache;
 
         m_AmbientProbePass ??= new AmbientProbePass(m_VolumetricCloudsMaterial)
         {
@@ -319,6 +324,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         PhysicallyBasedSky pbrSkyVolume = stack.GetComponent<PhysicallyBasedSky>();
         VisualEnvironment visualEnvVolume = stack.GetComponent<VisualEnvironment>();
         Fog fogVolume = stack.GetComponent<Fog>();
+
+        m_StaticFogSkyCache.dynamicEnvironmentTexture = m_AmbientProbePass.environmentTexture;
 
         const int physicallyBased = (int)VisualEnvironment.SkyType.PhysicallyBased;
         bool isPbrSky = pbrSkyVolume != null && visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == physicallyBased;
@@ -401,6 +408,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         if (m_AmbientProbePass != null)
             m_AmbientProbePass.Dispose();
 
+        if (m_StaticFogSkyCache != null)
+        {
+            m_StaticFogSkyCache.Dispose();
+            m_StaticFogSkyCache = null;
+        }
+
         if (m_PBSkyPostPass != null)
             m_PBSkyPostPass.Dispose();
 
@@ -475,6 +488,488 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         lastSkyType = visualEnvVolume.skyType.value;
         lastSkyAmbientMode = visualEnvVolume.skyAmbientMode.value;
+    }
+
+    /// <summary>
+    /// Keeps an immutable copy of the active scene's baked environment reflection for static mip
+    /// fog. Unity may replace or update ReflectionProbe.defaultTexture in place while scenes or
+    /// lighting data are loading, so camera passes must not sample it directly.
+    /// </summary>
+    private sealed class StaticFogSkyCache : IDisposable
+    {
+        private const string profilerTag = "Update Static Fog Environment";
+        private const int k_CopyMaterialPass = 6;
+        private const int k_CubemapFaceCount = 6;
+        private const int k_MaxSnapshotResolution = 128;
+        private static readonly Vector4 k_FullscreenScaleBias = new Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+
+        private static readonly int _FogSkyCopySource = Shader.PropertyToID("_FogSkyCopySource");
+        private static readonly int _FogSkyCopySourceHDR = Shader.PropertyToID("_FogSkyCopySource_HDR");
+        private static readonly int _FogSkyCopyMip = Shader.PropertyToID("_FogSkyCopyMip");
+        private static readonly int _FogSkyCopyFace = Shader.PropertyToID("_FogSkyCopyFace");
+
+        internal Material copyMaterial;
+        internal Texture dynamicEnvironmentTexture;
+
+        private sealed class SnapshotSlot : IDisposable
+        {
+            internal RTHandle handle;
+            internal int mipCount;
+            internal int resolution;
+            internal int sourceMipOffset;
+
+            internal bool Allocate(int sourceResolution, int sourceMipCount, string name)
+            {
+                resolution = sourceResolution;
+                sourceMipOffset = 0;
+                while (resolution > k_MaxSnapshotResolution)
+                {
+                    resolution = Mathf.Max(1, resolution >> 1);
+                    sourceMipOffset++;
+                }
+
+                RenderTextureDescriptor desc = new RenderTextureDescriptor(resolution, resolution)
+                {
+                    msaaSamples = 1,
+                    useMipMap = true,
+                    autoGenerateMips = false,
+                    dimension = TextureDimension.Cube,
+                    graphicsFormat = GraphicsFormat.B10G11R11_UFloatPack32,
+                    depthStencilFormat = GraphicsFormat.None,
+                    depthBufferBits = 0,
+                    useDynamicScale = false
+                };
+
+                RenderingUtils.ReAllocateHandleIfNeeded(ref handle, desc, FilterMode.Trilinear, TextureWrapMode.Clamp, name: name);
+                if (handle == null || handle.rt == null || !handle.rt.IsCreated())
+                    return false;
+
+                int availableSourceMipCount = sourceMipCount - sourceMipOffset;
+                mipCount = Mathf.Min(availableSourceMipCount, handle.rt.mipmapCount);
+                return mipCount > 1;
+            }
+
+            public void Dispose()
+            {
+                handle?.Release();
+                handle = null;
+                mipCount = 0;
+                resolution = 0;
+                sourceMipOffset = 0;
+            }
+        }
+
+        internal readonly struct Snapshot
+        {
+            internal readonly RTHandle handle;
+            internal readonly int mipCount;
+            internal readonly int generation;
+
+            internal Snapshot(RTHandle handle, int mipCount, int generation)
+            {
+                this.handle = handle;
+                this.mipCount = mipCount;
+                this.generation = generation;
+            }
+
+            internal bool IsValid => handle != null && handle.rt != null && handle.rt.IsCreated() && mipCount > 1;
+        }
+
+        private readonly struct SourceFingerprint : IEquatable<SourceFingerprint>
+        {
+            internal readonly int sceneHandle;
+            internal readonly int lightingRevision;
+            internal readonly int textureInstanceId;
+            internal readonly int width;
+            internal readonly int height;
+            internal readonly int mipCount;
+            internal readonly GraphicsFormat graphicsFormat;
+            internal readonly uint updateCount;
+            internal readonly Vector4 hdrDecodeValues;
+
+            internal SourceFingerprint(int sceneHandle, int lightingRevision, Texture texture, Vector4 hdrDecodeValues)
+            {
+                this.sceneHandle = sceneHandle;
+                this.lightingRevision = lightingRevision;
+                textureInstanceId = texture.GetHashCode();
+                width = texture.width;
+                height = texture.height;
+                mipCount = texture.mipmapCount;
+                graphicsFormat = texture.graphicsFormat;
+                updateCount = texture.updateCount;
+                this.hdrDecodeValues = hdrDecodeValues;
+            }
+
+            public bool Equals(SourceFingerprint other)
+            {
+                return sceneHandle == other.sceneHandle
+                    && lightingRevision == other.lightingRevision
+                    && HasSameTextureContent(other);
+            }
+
+            internal bool HasSameTextureContent(SourceFingerprint other)
+            {
+                return textureInstanceId == other.textureInstanceId
+                    && width == other.width
+                    && height == other.height
+                    && mipCount == other.mipCount
+                    && graphicsFormat == other.graphicsFormat
+                    && updateCount == other.updateCount
+                    && hdrDecodeValues == other.hdrDecodeValues;
+            }
+        }
+
+        private readonly SnapshotSlot[] m_Slots = { new SnapshotSlot(), new SnapshotSlot() };
+        private int m_ActiveSlot = -1;
+        private int m_PendingSlot = -1;
+        private int m_PendingFrame = -1;
+        private int m_Generation;
+        private int m_SceneHandle = int.MinValue;
+        private int m_LightingRevision;
+        private bool m_HasActiveFingerprint;
+        private bool m_HasPendingFingerprint;
+        private bool m_HasCandidateFingerprint;
+        private bool m_HasRejectedFingerprint;
+        private bool m_BakeInProgress;
+        private bool m_LightingDataCleared;
+        private int m_CandidateFirstFrame;
+        private SourceFingerprint m_ActiveFingerprint;
+        private SourceFingerprint m_PendingFingerprint;
+        private SourceFingerprint m_CandidateFingerprint;
+        private SourceFingerprint m_RejectedFingerprint;
+        private RTHandle m_PendingSourceHandle;
+
+        internal StaticFogSkyCache()
+        {
+            UnityEngine.SceneManagement.SceneManager.activeSceneChanged += OnActiveSceneChanged;
+
+        #if UNITY_EDITOR
+            UnityEditor.SceneManagement.EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+            UnityEditor.Lightmapping.bakeStarted += OnBakeStarted;
+            UnityEditor.Lightmapping.bakeCompleted += OnBakeCompleted;
+            UnityEditor.Lightmapping.lightingDataUpdated += OnLightingDataUpdated;
+            UnityEditor.Lightmapping.lightingDataCleared += OnLightingDataCleared;
+        #endif
+        }
+
+        internal Snapshot GetSnapshot(CommandBuffer cmd)
+        {
+            RefreshSceneState();
+            CompletePendingUpdate();
+
+            if (TryGetStableSource(out Texture source, out SourceFingerprint fingerprint, out Vector4 hdrDecodeValues))
+                ScheduleUpdate(cmd, source, fingerprint, hdrDecodeValues);
+
+            return GetActiveSnapshot();
+        }
+
+    #if UNITY_6000_0_OR_NEWER
+        private class CopyPassData
+        {
+            internal Material material;
+            internal Texture source;
+            internal RTHandle destination;
+            internal int mipCount;
+            internal int resolution;
+            internal int sourceMipOffset;
+            internal Vector4 hdrDecodeValues;
+        }
+
+        internal Snapshot GetSnapshot(RenderGraph renderGraph)
+        {
+            RefreshSceneState();
+            CompletePendingUpdate();
+
+            if (TryGetStableSource(out Texture source, out SourceFingerprint fingerprint, out Vector4 hdrDecodeValues))
+                ScheduleUpdate(renderGraph, source, fingerprint, hdrDecodeValues);
+
+            return GetActiveSnapshot();
+        }
+
+        private void ScheduleUpdate(RenderGraph renderGraph, Texture source, SourceFingerprint fingerprint, Vector4 hdrDecodeValues)
+        {
+            if (!PreparePendingSlot(source, fingerprint, out SnapshotSlot slot))
+                return;
+
+            m_PendingSourceHandle = RTHandles.Alloc(source);
+            TextureHandle sourceHandle = renderGraph.ImportTexture(m_PendingSourceHandle);
+            TextureHandle destinationHandle = renderGraph.ImportTexture(slot.handle);
+
+            using (var builder = renderGraph.AddUnsafePass<CopyPassData>(profilerTag, out var passData))
+            {
+                passData.material = copyMaterial;
+                passData.source = source;
+                passData.destination = slot.handle;
+                passData.mipCount = slot.mipCount;
+                passData.resolution = slot.resolution;
+                passData.sourceMipOffset = slot.sourceMipOffset;
+                passData.hdrDecodeValues = hdrDecodeValues;
+
+                builder.UseTexture(sourceHandle, AccessFlags.Read);
+                builder.UseTexture(destinationHandle, AccessFlags.Write);
+                builder.AllowGlobalStateModification(true);
+                builder.AllowPassCulling(false);
+                builder.SetRenderFunc((CopyPassData data, UnsafeGraphContext context) =>
+                {
+                    CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+                    CopyEnvironment(cmd, data.material, data.source, data.destination, data.mipCount, data.resolution, data.sourceMipOffset, data.hdrDecodeValues);
+                });
+            }
+
+            MarkUpdatePending(fingerprint);
+        }
+    #endif
+
+        private void ScheduleUpdate(CommandBuffer cmd, Texture source, SourceFingerprint fingerprint, Vector4 hdrDecodeValues)
+        {
+            if (!PreparePendingSlot(source, fingerprint, out SnapshotSlot slot))
+                return;
+
+            CopyEnvironment(cmd, copyMaterial, source, slot.handle, slot.mipCount, slot.resolution, slot.sourceMipOffset, hdrDecodeValues);
+            MarkUpdatePending(fingerprint);
+        }
+
+        private bool PreparePendingSlot(Texture source, SourceFingerprint fingerprint, out SnapshotSlot slot)
+        {
+            slot = null;
+            if (m_HasPendingFingerprint || copyMaterial == null || copyMaterial.passCount <= k_CopyMaterialPass)
+                return false;
+
+            int slotIndex = m_ActiveSlot == 0 ? 1 : 0;
+            slot = m_Slots[slotIndex];
+            if (!slot.Allocate(source.width, source.mipmapCount, $"Static Fog Environment {slotIndex}"))
+                return false;
+
+            m_PendingSlot = slotIndex;
+            m_PendingFingerprint = fingerprint;
+            return true;
+        }
+
+        private void MarkUpdatePending(SourceFingerprint fingerprint)
+        {
+            m_PendingFingerprint = fingerprint;
+            m_HasPendingFingerprint = true;
+            m_PendingFrame = Time.renderedFrameCount;
+        }
+
+        private static void CopyEnvironment(CommandBuffer cmd, Material material, Texture source, RTHandle destination, int mipCount, int resolution, int sourceMipOffset, Vector4 hdrDecodeValues)
+        {
+            cmd.SetGlobalTexture(_FogSkyCopySource, source);
+            cmd.SetGlobalVector(_FogSkyCopySourceHDR, hdrDecodeValues);
+
+            for (int mip = 0; mip < mipCount; mip++)
+            {
+                cmd.SetGlobalFloat(_FogSkyCopyMip, sourceMipOffset + mip);
+                int mipResolution = Mathf.Max(1, resolution >> mip);
+
+                for (int face = 0; face < k_CubemapFaceCount; face++)
+                {
+                    cmd.SetGlobalInteger(_FogSkyCopyFace, face);
+                    CoreUtils.SetRenderTarget(cmd, destination, ClearFlag.None, mip, (CubemapFace)face);
+                    cmd.SetViewport(new Rect(0.0f, 0.0f, mipResolution, mipResolution));
+                    Blitter.BlitTexture(cmd, k_FullscreenScaleBias, material, k_CopyMaterialPass);
+                }
+            }
+        }
+
+        private Snapshot GetActiveSnapshot()
+        {
+            if (m_ActiveSlot < 0)
+                return default;
+
+            SnapshotSlot slot = m_Slots[m_ActiveSlot];
+            return new Snapshot(slot.handle, slot.mipCount, m_Generation);
+        }
+
+        private void RefreshSceneState()
+        {
+            SetActiveScene(UnityEngine.SceneManagement.SceneManager.GetActiveScene());
+        }
+
+        private void OnActiveSceneChanged(UnityEngine.SceneManagement.Scene previousScene, UnityEngine.SceneManagement.Scene newScene)
+        {
+            SetActiveScene(newScene);
+        }
+
+        private void SetActiveScene(UnityEngine.SceneManagement.Scene scene)
+        {
+            // Scene.GetHashCode maps to the loaded scene's unique handle on both the int-handle
+            // Unity 6.0 API and the SceneHandle API introduced in later Unity 6 releases.
+            int sceneHandle = scene.GetHashCode();
+            if (sceneHandle == m_SceneHandle)
+                return;
+
+            // An additive scene becoming active changes the global RenderSettings/default
+            // reflection. Reject the newest source from the previous active scene so Unity cannot
+            // briefly republish it as the new scene's environment while lighting data settles.
+            RejectCurrentSource();
+
+            m_SceneHandle = sceneHandle;
+            m_LightingRevision++;
+            m_LightingDataCleared = false;
+            ReleaseSnapshots();
+        }
+
+        private void RejectCurrentSource()
+        {
+            if (m_HasPendingFingerprint)
+                m_RejectedFingerprint = m_PendingFingerprint;
+            else if (m_HasCandidateFingerprint)
+                m_RejectedFingerprint = m_CandidateFingerprint;
+            else if (m_HasActiveFingerprint)
+                m_RejectedFingerprint = m_ActiveFingerprint;
+            else
+            {
+                m_HasRejectedFingerprint = false;
+                return;
+            }
+
+            m_HasRejectedFingerprint = true;
+        }
+
+        private void CompletePendingUpdate()
+        {
+            if (!m_HasPendingFingerprint || Time.renderedFrameCount <= m_PendingFrame)
+                return;
+
+            bool sourceStillMatches = TryCaptureSource(out _, out SourceFingerprint fingerprint, out _)
+                && fingerprint.Equals(m_PendingFingerprint)
+                && !IsRejected(fingerprint);
+
+            if (sourceStillMatches)
+            {
+                m_ActiveSlot = m_PendingSlot;
+                m_ActiveFingerprint = m_PendingFingerprint;
+                m_HasActiveFingerprint = true;
+                m_Generation++;
+            }
+
+            m_HasPendingFingerprint = false;
+            m_PendingSlot = -1;
+            m_PendingFrame = -1;
+            m_PendingSourceHandle?.Release();
+            m_PendingSourceHandle = null;
+        }
+
+        private bool TryGetStableSource(out Texture source, out SourceFingerprint fingerprint, out Vector4 hdrDecodeValues)
+        {
+            source = null;
+            fingerprint = default;
+            hdrDecodeValues = default;
+
+            if (IsBakeRunning() || m_LightingDataCleared
+                || !TryCaptureSource(out source, out fingerprint, out hdrDecodeValues) || IsRejected(fingerprint))
+                return false;
+
+            if (m_HasActiveFingerprint && fingerprint.Equals(m_ActiveFingerprint))
+                return false;
+
+            if (m_HasPendingFingerprint && fingerprint.Equals(m_PendingFingerprint))
+                return false;
+
+            if (!m_HasCandidateFingerprint || !fingerprint.Equals(m_CandidateFingerprint))
+            {
+                m_CandidateFingerprint = fingerprint;
+                m_HasCandidateFingerprint = true;
+                m_CandidateFirstFrame = Time.renderedFrameCount;
+                return false;
+            }
+
+            return Time.renderedFrameCount > m_CandidateFirstFrame;
+        }
+
+        private bool TryCaptureSource(out Texture source, out SourceFingerprint fingerprint, out Vector4 hdrDecodeValues)
+        {
+            source = ReflectionProbe.defaultTexture;
+            hdrDecodeValues = ReflectionProbe.defaultTextureHDRDecodeValues;
+            fingerprint = default;
+
+            if (source == null || source == dynamicEnvironmentTexture || source.dimension != TextureDimension.Cube
+                || source.width <= 1 || source.height != source.width || source.mipmapCount <= 1
+                || source.graphicsFormat == GraphicsFormat.None)
+                return false;
+
+            if (source is RenderTexture renderTexture && !renderTexture.IsCreated())
+                return false;
+
+            fingerprint = new SourceFingerprint(m_SceneHandle, m_LightingRevision, source, hdrDecodeValues);
+            return true;
+        }
+
+        private bool IsRejected(SourceFingerprint fingerprint)
+        {
+            return m_HasRejectedFingerprint && fingerprint.HasSameTextureContent(m_RejectedFingerprint);
+        }
+
+        private bool IsBakeRunning()
+        {
+        #if UNITY_EDITOR
+            return m_BakeInProgress || UnityEditor.Lightmapping.isRunning;
+        #else
+            return false;
+        #endif
+        }
+
+    #if UNITY_EDITOR
+        private void OnBakeStarted()
+        {
+            m_BakeInProgress = true;
+        }
+
+        private void OnBakeCompleted()
+        {
+            m_BakeInProgress = false;
+            m_LightingRevision++;
+            m_HasCandidateFingerprint = false;
+            m_HasRejectedFingerprint = false;
+            m_LightingDataCleared = false;
+        }
+
+        private void OnLightingDataUpdated()
+        {
+            m_LightingRevision++;
+            m_HasCandidateFingerprint = false;
+            m_LightingDataCleared = false;
+        }
+
+        private void OnLightingDataCleared()
+        {
+            RejectCurrentSource();
+
+            m_LightingRevision++;
+            m_LightingDataCleared = true;
+            ReleaseSnapshots();
+        }
+    #endif
+
+        private void ReleaseSnapshots()
+        {
+            m_Slots[0].Dispose();
+            m_Slots[1].Dispose();
+            m_PendingSourceHandle?.Release();
+            m_PendingSourceHandle = null;
+            m_ActiveSlot = -1;
+            m_PendingSlot = -1;
+            m_PendingFrame = -1;
+            m_HasActiveFingerprint = false;
+            m_HasPendingFingerprint = false;
+            m_HasCandidateFingerprint = false;
+        }
+
+        public void Dispose()
+        {
+            UnityEngine.SceneManagement.SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+
+        #if UNITY_EDITOR
+            UnityEditor.SceneManagement.EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            UnityEditor.Lightmapping.bakeStarted -= OnBakeStarted;
+            UnityEditor.Lightmapping.bakeCompleted -= OnBakeCompleted;
+            UnityEditor.Lightmapping.lightingDataUpdated -= OnLightingDataUpdated;
+            UnityEditor.Lightmapping.lightingDataCleared -= OnLightingDataCleared;
+        #endif
+
+            ReleaseSnapshots();
+        }
     }
 
     /// <summary>
@@ -1804,6 +2299,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         public bool fogDepthEdgeAntialiasing;
 
         public Material lutMaterial;
+        public StaticFogSkyCache staticFogSkyCache;
 
         private static readonly int _FogEnabled = Shader.PropertyToID("_FogEnabled");
         private static readonly int _MaxFogDistance = Shader.PropertyToID("_MaxFogDistance");
@@ -1824,15 +2320,23 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private static readonly int _FogSHBg = Shader.PropertyToID("_FogSHBg");
         private static readonly int _FogSHBb = Shader.PropertyToID("_FogSHBb");
         private static readonly int _FogSHC = Shader.PropertyToID("_FogSHC");
+        private static readonly int _FogSkyTexture = Shader.PropertyToID("_FogSkyTexture");
+        private static readonly int _FogSkyTextureMipCount = Shader.PropertyToID("_FogSkyTextureMipCount");
+        private static readonly int _FogSkySourceMode = Shader.PropertyToID("_FogSkySourceMode");
+
+        private const float k_DynamicFogSky = 0.0f;
+        private const float k_StaticFogSky = 1.0f;
+        private const float k_AmbientProbeFogSky = 2.0f;
 
         // "_ScreenSize" that supports dynamic resolution
         private static readonly int _ScreenResolution = Shader.PropertyToID("_ScreenResolution");
 
         private readonly LocalKeyword m_FogDepthEdgeAntialiasingKeyword;
 
-        public AtmosphericScatteringPass(Material lutMaterial)
+        public AtmosphericScatteringPass(Material lutMaterial, StaticFogSkyCache staticFogSkyCache)
         {
             this.lutMaterial = lutMaterial;
+            this.staticFogSkyCache = staticFogSkyCache;
             m_FogDepthEdgeAntialiasingKeyword = new LocalKeyword(lutMaterial.shader, k_FogDepthEdgeAntialiasingKeywordName);
         }
 
@@ -1847,7 +2351,16 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             bool isFogEnabled = fog != null && fog.IsActive();
             if (isFogEnabled)
-                SetFogProperties(cmd, GetFogProperties(renderingData.cameraData.camera));
+            {
+                StaticFogSkyCache.Snapshot staticFogSky = UsesStaticSkyFog()
+                    ? staticFogSkyCache.GetSnapshot(cmd)
+                    : default;
+
+                if (staticFogSky.IsValid)
+                    cmd.SetGlobalTexture(_FogSkyTexture, staticFogSky.handle);
+
+                SetFogProperties(cmd, GetFogProperties(renderingData.cameraData.camera, staticFogSky));
+            }
 
             cmd.SetKeyword(lutMaterial, m_FogDepthEdgeAntialiasingKeyword, isFogEnabled && fogDepthEdgeAntialiasing);
         }
@@ -1894,6 +2407,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal LocalKeyword fogDepthEdgeAntialiasingKeyword;
             internal FogProperties fogProperties;
             internal Vector2Int screenResolution;
+            internal TextureHandle staticFogSkyTexture;
         }
 
         // This static method is used to execute the pass and passed as the RenderFunc delegate to the RenderGraph render pass
@@ -1907,7 +2421,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             cmd.SetKeyword(data.lutMaterial, data.fogDepthEdgeAntialiasingKeyword, data.enableFog && data.fogDepthEdgeAntialiasing);
 
             if (data.enableFog)
+            {
+                if (data.staticFogSkyTexture.IsValid())
+                    cmd.SetGlobalTexture(_FogSkyTexture, data.staticFogSkyTexture);
+
                 SetFogProperties(cmd, data.fogProperties);
+            }
 
             Blitter.BlitCameraTexture(cmd, data.cameraColorHandle, data.cameraColorHandle, RenderBufferLoadAction.Load, RenderBufferStoreAction.Store, data.lutMaterial, pass: 4);
         }
@@ -1916,26 +2435,35 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         // Each ScriptableRenderPass can use the RenderGraph handle to add multiple render passes to the render graph
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
+            UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
+            UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
+
+            bool isFogEnabled = fog != null && fog.IsActive();
+            StaticFogSkyCache.Snapshot staticFogSky = isFogEnabled && UsesStaticSkyFog()
+                ? staticFogSkyCache.GetSnapshot(renderGraph)
+                : default;
+            TextureHandle staticFogSkyTexture = staticFogSky.IsValid
+                ? renderGraph.ImportTexture(staticFogSky.handle)
+                : default;
+
             // add an unsafe render pass to the render graph, specifying the name and the data type that will be passed to the ExecutePass function
             using (var builder = renderGraph.AddUnsafePass<PassData>(profilerTag, out var passData))
             {
                 // UniversalResourceData contains all the texture handles used by the renderer, including the active color and depth textures
                 // The active color and depth textures are the main color and depth buffers that the camera renders into
-                UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
-                UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
-
-                bool isFogEnabled = fog != null && fog.IsActive();
-
                 passData.lutMaterial = lutMaterial;
                 passData.cameraColorHandle = resourceData.activeColorTexture;
                 passData.enableFog = isFogEnabled;
                 passData.fogDepthEdgeAntialiasing = fogDepthEdgeAntialiasing;
                 passData.fogDepthEdgeAntialiasingKeyword = m_FogDepthEdgeAntialiasingKeyword;
-                passData.fogProperties = isFogEnabled ? GetFogProperties(cameraData.camera) : default;
+                passData.fogProperties = isFogEnabled ? GetFogProperties(cameraData.camera, staticFogSky) : default;
                 passData.screenResolution = new Vector2Int(cameraData.cameraTargetDescriptor.width, cameraData.cameraTargetDescriptor.height);
+                passData.staticFogSkyTexture = staticFogSkyTexture;
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
+                if (staticFogSkyTexture.IsValid())
+                    builder.UseTexture(staticFogSkyTexture, AccessFlags.Read);
                 builder.UseAllGlobalTextures(true);
 
                 builder.AllowGlobalStateModification(true);
@@ -1968,9 +2496,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal float fogWaterHeight;
             internal bool useFogAmbientProbe;
             internal SphericalHarmonicsL2 fogAmbientProbe;
+            internal float fogSkySourceMode;
+            internal float fogSkyTextureMipCount;
         }
 
-        private FogProperties GetFogProperties(Camera camera)
+        private FogProperties GetFogProperties(Camera camera, StaticFogSkyCache.Snapshot staticFogSky)
         {
             var cameraPos = camera.transform.position;
 
@@ -1995,7 +2525,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             float layerDepth = Mathf.Max(0.01f, fog.maximumHeight.value - fog.baseHeight.value);
             float H = ScaleHeightFromLayerDepth(layerDepth);
 
-            bool useFogAmbientProbe = fog.colorMode.value == Fog.FogColorMode.SkyColor && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static;
+            bool usesStaticSky = visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static;
+            bool useFogAmbientProbe = fog.colorMode.value == Fog.FogColorMode.SkyColor && usesStaticSky && !staticFogSky.IsValid;
 
             return new FogProperties
             {
@@ -2011,8 +2542,18 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 underWaterEnabled = fog.underWater.value ? 1.0f : 0.0f,
                 fogWaterHeight = fog.waterHeight.value,
                 useFogAmbientProbe = useFogAmbientProbe,
-                fogAmbientProbe = useFogAmbientProbe ? RenderSettings.ambientProbe : default
+                fogAmbientProbe = useFogAmbientProbe ? RenderSettings.ambientProbe : default,
+                fogSkySourceMode = usesStaticSky
+                    ? staticFogSky.IsValid ? k_StaticFogSky : k_AmbientProbeFogSky
+                    : k_DynamicFogSky,
+                fogSkyTextureMipCount = staticFogSky.IsValid ? staticFogSky.mipCount : 0.0f
             };
+        }
+
+        private bool UsesStaticSkyFog()
+        {
+            return fog.colorMode.value == Fog.FogColorMode.SkyColor
+                && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static;
         }
 
         private static void SetFogProperties(CommandBuffer cmd, FogProperties properties)
@@ -2028,6 +2569,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             cmd.SetGlobalVector(_HeightFogExponents, properties.heightFogExponents);
             cmd.SetGlobalFloat(_UnderWaterEnabled, properties.underWaterEnabled);
             cmd.SetGlobalFloat(_FogWaterHeight, properties.fogWaterHeight);
+            cmd.SetGlobalFloat(_FogSkySourceMode, properties.fogSkySourceMode);
+            cmd.SetGlobalFloat(_FogSkyTextureMipCount, properties.fogSkyTextureMipCount);
 
             if (properties.useFogAmbientProbe)
                 SetFogAmbientProbe(cmd, properties.fogAmbientProbe);
@@ -2186,6 +2729,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private RTHandle probeColorHandle;
         private RTHandle skyColorHandle;
 
+        internal Texture environmentTexture => probeColorHandle;
+
         // TODO: expose this property
         private static readonly int reflectionResolution = 128;
 
@@ -2234,6 +2779,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         public AmbientProbePass(Material material)
         {
             cloudsMaterial = material;
+        }
+
+        internal static Matrix4x4 GetSkyViewMatrix(int face)
+        {
+            Matrix4x4 viewMatrix = skyViews[face];
+            return viewMatrix * Matrix4x4.Scale(new Vector3(1.0f, 1.0f, -1.0f));
         }
 
         private static int GetVolumetricCloudsEnvironmentPass(Material material)
@@ -2322,8 +2873,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                     //var lookAt = Matrix4x4.LookAt(Vector3.zero, CoreUtils.lookAtList[i], CoreUtils.upVectorList[i]);
                     //Matrix4x4 viewMatrix = lookAt * Matrix4x4.Scale(new Vector3(1.0f, 1.0f, -1.0f)); // Need to scale -1.0 on Z to match what is being done in the camera.wolrdToCameraMatrix API. ...
 
-                    Matrix4x4 viewMatrix = skyViews[i];
-                    viewMatrix *= Matrix4x4.Scale(new Vector3(1.0f, 1.0f, -1.0f)); // Need to scale -1.0 on Z to match what is being done in the camera.wolrdToCameraMatrix API. ...
+                    // Need to scale -1.0 on Z to match what is being done in the camera.worldToCameraMatrix API.
+                    Matrix4x4 viewMatrix = GetSkyViewMatrix(i);
                     skyViewMatrices[i] = viewMatrix;
 
                     Matrix4x4 skyMatrixVP = skyMatrixP * skyViewMatrices[i];
@@ -2552,8 +3103,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                     //var lookAt = Matrix4x4.LookAt(Vector3.zero, CoreUtils.lookAtList[i], CoreUtils.upVectorList[i]);
                     //Matrix4x4 viewMatrix = lookAt * Matrix4x4.Scale(new Vector3(1.0f, 1.0f, -1.0f)); // Need to scale -1.0 on Z to match what is being done in the camera.wolrdToCameraMatrix API. ...
 
-                    Matrix4x4 viewMatrix = skyViews[i];
-                    viewMatrix *= Matrix4x4.Scale(new Vector3(1.0f, 1.0f, -1.0f)); // Need to scale -1.0 on Z to match what is being done in the camera.wolrdToCameraMatrix API. ...
+                    // Need to scale -1.0 on Z to match what is being done in the camera.worldToCameraMatrix API.
+                    Matrix4x4 viewMatrix = GetSkyViewMatrix(i);
                     skyViewMatrices[i] = viewMatrix;
                     rendererListHandles[i] = renderGraph.CreateSkyboxRendererList(cameraData.camera, skyProjectionMatrix, viewMatrix);
                     builder.UseRendererList(rendererListHandles[i]);
