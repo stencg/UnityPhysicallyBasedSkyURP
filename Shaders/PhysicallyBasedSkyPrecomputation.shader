@@ -17,6 +17,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
         // Pass 4: Opaque Atmospheric Scattering
         // Pass 5: Precomputed Atmospheric Scattering (Currently Unused)
         // Pass 6: Static Fog Environment Snapshot
+        // Pass 7: Volumetric Clouds Combine
 
         Pass
         {
@@ -938,6 +939,158 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                     directionWS,
                     _FogSkyCopyMip);
                 return float4(DecodeHDREnvironment(encodedEnvironment, _FogSkyCopySource_HDR), 1.0);
+            }
+            ENDHLSL
+        }
+
+        // This pass intentionally lives in PBSky rather than the optional clouds package. It is
+        // therefore compiled whenever PBSky is installed and does not depend on ShaderLab
+        // PackageRequirements, which can omit optional passes for local packages on Android.
+        Pass
+        {
+            Name "Volumetric Clouds - Combine with PBSky Scattering"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            Blend One SrcAlpha, Zero One
+
+            HLSLPROGRAM
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+
+            #pragma vertex Vert
+            #pragma fragment frag
+            #pragma target 3.5
+
+            #pragma multi_compile_local_fragment _ _LOW_RESOLUTION_CLOUDS
+            #pragma multi_compile_local_fragment _ _OUTPUT_CLOUDS_DEPTH
+            #pragma multi_compile_local_fragment _ _DEPTH_AWARE_CLOUD_EDGE_FILTER
+            #pragma multi_compile_local_fragment _ _DEPTH_AWARE_CLOUD_EDGE_FILTER_DEBUG
+
+            TEXTURE2D_X(_VolumetricCloudsLightingTexture);
+            float4 _VolumetricCloudsLightingTexture_TexelSize;
+            TEXTURE2D_X_FLOAT(_VolumetricCloudsDepthTexture);
+            SAMPLER(s_point_clamp_sampler);
+
+            float4 _ScreenResolution;
+            float _DepthAwareCloudEdgeFilterWidth;
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "./PhysicallyBasedSkyRendering.hlsl"
+            #include "./PhysicallyBasedSkyEvaluation.hlsl"
+            #define OPAQUE_FOG_PASS
+            #include "./AtmosphericScattering.hlsl"
+
+            #define RAW_FAR_CLIP_THRESHOLD 1e-6
+            #define CLOUDS_RAW_FAR_CLIP_VALUE UNITY_RAW_FAR_CLIP_VALUE ? (UNITY_RAW_FAR_CLIP_VALUE - RAW_FAR_CLIP_THRESHOLD) : (UNITY_RAW_FAR_CLIP_VALUE + RAW_FAR_CLIP_THRESHOLD)
+            #define CLOUD_UPSCALE_KERNEL_SIZE 3
+            #define CLOUD_UPSCALE_TOLERANCE 1e-5
+
+            half CloudUpscaleWeight(half distance)
+            {
+                return exp(-distance * distance);
+            }
+
+            half4 BilateralUpscaleClouds(float2 screenUV)
+            {
+                float2 offsetUV = (floor(screenUV * _VolumetricCloudsLightingTexture_TexelSize.zw) + 0.5)
+                    * _VolumetricCloudsLightingTexture_TexelSize.xy;
+                half4 centerColor = SAMPLE_TEXTURE2D_X_LOD(
+                    _VolumetricCloudsLightingTexture, s_linear_clamp_sampler, screenUV, 0);
+                half4 resultColor = 0.0;
+                half normalization = 0.0;
+
+                for (int y = -CLOUD_UPSCALE_KERNEL_SIZE; y <= CLOUD_UPSCALE_KERNEL_SIZE; y++)
+                {
+                    for (int x = -CLOUD_UPSCALE_KERNEL_SIZE; x <= CLOUD_UPSCALE_KERNEL_SIZE; x++)
+                    {
+                        half4 neighborColor = SAMPLE_TEXTURE2D_X_LOD(
+                            _VolumetricCloudsLightingTexture,
+                            s_linear_clamp_sampler,
+                            offsetUV + float2(x, y) * _VolumetricCloudsLightingTexture_TexelSize.xy,
+                            0);
+                        half2 distance = (screenUV - offsetUV) * _ScreenParams.xy;
+                        half colorDifference = length(centerColor - neighborColor);
+                        half weight = CloudUpscaleWeight(length(distance))
+                            * rcp(colorDifference + CLOUD_UPSCALE_TOLERANCE);
+                        resultColor += neighborColor * weight;
+                        normalization += weight;
+                    }
+                }
+
+                return resultColor * rcp(normalization);
+            }
+
+            half4 FilterCloudsAtOpaqueDepthEdges(half4 cloudsColor, float2 screenUV, out bool opaqueEdge)
+            {
+                opaqueEdge = false;
+                float2 texelSize = _CameraDepthTexture_TexelSize.xy * _DepthAwareCloudEdgeFilterWidth;
+                float centerDepth = SampleSceneDepth(screenUV);
+                bool centerIsSky = abs(centerDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6;
+                float2 offsets[4] =
+                {
+                    float2(-texelSize.x, 0.0),
+                    float2(texelSize.x, 0.0),
+                    float2(0.0, -texelSize.y),
+                    float2(0.0, texelSize.y)
+                };
+
+                half4 filteredClouds = cloudsColor;
+                for (int i = 0; i < 4; i++)
+                {
+                    float2 neighborUV = screenUV + offsets[i];
+                    float neighborDepth = SampleSceneDepth(neighborUV);
+                    bool neighborIsSky = abs(neighborDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6;
+                    if (centerIsSky != neighborIsSky)
+                        opaqueEdge = true;
+                    filteredClouds += SAMPLE_TEXTURE2D_X_LOD(
+                        _VolumetricCloudsLightingTexture, s_linear_clamp_sampler, neighborUV, 0);
+                }
+
+                return opaqueEdge ? filteredClouds * 0.2h : cloudsColor;
+            }
+
+            half4 frag(Varyings input) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                float2 screenUV = input.texcoord;
+
+            #ifdef _LOW_RESOLUTION_CLOUDS
+                half4 cloudsColor = BilateralUpscaleClouds(screenUV);
+            #else
+                half4 cloudsColor = SAMPLE_TEXTURE2D_X_LOD(
+                    _VolumetricCloudsLightingTexture, s_linear_clamp_sampler, screenUV, 0);
+            #endif
+
+            #if defined(_DEPTH_AWARE_CLOUD_EDGE_FILTER)
+                bool opaqueEdge;
+                cloudsColor = FilterCloudsAtOpaqueDepthEdges(cloudsColor, screenUV, opaqueEdge);
+                #if defined(_DEPTH_AWARE_CLOUD_EDGE_FILTER_DEBUG)
+                return half4(opaqueEdge ? 1.0 : 0.0, opaqueEdge ? 1.0 : 0.0, opaqueEdge ? 1.0 : 0.0, 1.0);
+                #endif
+            #endif
+
+                if (_EnableAtmosphericScattering || _FogEnabled)
+                {
+                #ifdef _OUTPUT_CLOUDS_DEPTH
+                    float depth = SAMPLE_TEXTURE2D_X_LOD(
+                        _VolumetricCloudsDepthTexture, s_point_clamp_sampler, screenUV, 0).r;
+                    bool edgeOfClouds = depth == UNITY_RAW_FAR_CLIP_VALUE && cloudsColor.a < 1.0;
+                    depth = edgeOfClouds ? CLOUDS_RAW_FAR_CLIP_VALUE : depth;
+                #else
+                    float depth = cloudsColor.a == 1.0 ? UNITY_RAW_FAR_CLIP_VALUE : CLOUDS_RAW_FAR_CLIP_VALUE;
+                #endif
+
+                    PositionInputs posInput = GetPositionInput(
+                        input.positionCS.xy, _ScreenResolution.zw, depth, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+                    half3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
+                    half3 volumeColor;
+                    half3 volumeOpacity;
+                    EvaluateAtmosphericScattering(posInput, V, volumeColor, volumeOpacity);
+                    cloudsColor.xyz = volumeColor * (1.0 - cloudsColor.w)
+                        + (1.0 - volumeOpacity) * cloudsColor.xyz;
+                }
+
+                return cloudsColor;
             }
             ENDHLSL
         }

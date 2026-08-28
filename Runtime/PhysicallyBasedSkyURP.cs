@@ -464,6 +464,15 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             RenderSettings.customReflectionTexture = null;
             RenderSettings.defaultReflectionMode = DefaultReflectionMode.Skybox;
+
+        #if UNITY_EDITOR
+            if (!isInitialSkyUpdate && !Application.isPlaying)
+            {
+                var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+                if (scene.IsValid() && scene.isLoaded)
+                    UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
+            }
+        #endif
         }
 
         // Update the sky material
@@ -493,7 +502,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     /// <summary>
     /// Keeps an immutable copy of the active scene's baked environment reflection for static mip
     /// fog. Unity may replace or update ReflectionProbe.defaultTexture in place while scenes or
-    /// lighting data are loading, so camera passes must not sample it directly.
+    /// lighting data are loading, so camera passes must not sample it directly. Lighting changes
+    /// preserve the last valid copy until a stable replacement is ready; scene changes invalidate it.
     /// </summary>
     private sealed class StaticFogSkyCache : IDisposable
     {
@@ -604,12 +614,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             {
                 return sceneHandle == other.sceneHandle
                     && lightingRevision == other.lightingRevision
-                    && HasSameTextureContent(other);
-            }
-
-            internal bool HasSameTextureContent(SourceFingerprint other)
-            {
-                return textureInstanceId == other.textureInstanceId
+                    && textureInstanceId == other.textureInstanceId
                     && width == other.width
                     && height == other.height
                     && mipCount == other.mipCount
@@ -629,15 +634,16 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private bool m_HasActiveFingerprint;
         private bool m_HasPendingFingerprint;
         private bool m_HasCandidateFingerprint;
-        private bool m_HasRejectedFingerprint;
         private bool m_BakeInProgress;
-        private bool m_LightingDataCleared;
         private int m_CandidateFirstFrame;
         private SourceFingerprint m_ActiveFingerprint;
         private SourceFingerprint m_PendingFingerprint;
         private SourceFingerprint m_CandidateFingerprint;
-        private SourceFingerprint m_RejectedFingerprint;
         private RTHandle m_PendingSourceHandle;
+#if UNITY_EDITOR
+        private const int k_MaxEditorRenderAttempts = 16;
+        private int m_EditorRenderAttempts;
+#endif
 
         internal StaticFogSkyCache()
         {
@@ -750,6 +756,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             m_PendingFingerprint = fingerprint;
             m_HasPendingFingerprint = true;
             m_PendingFrame = Time.renderedFrameCount;
+            RequestEditorRender();
         }
 
         private static void CopyEnvironment(CommandBuffer cmd, Material material, Texture source, RTHandle destination, int mipCount, int resolution, int sourceMipOffset, Vector4 hdrDecodeValues)
@@ -774,11 +781,26 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private Snapshot GetActiveSnapshot()
         {
-            if (m_ActiveSlot < 0)
-                return default;
+            Snapshot snapshot = default;
+            if (m_ActiveSlot >= 0)
+            {
+                SnapshotSlot slot = m_Slots[m_ActiveSlot];
+                snapshot = new Snapshot(slot.handle, slot.mipCount, m_Generation);
+                if (!snapshot.IsValid)
+                {
+                    slot.Dispose();
+                    m_ActiveSlot = -1;
+                    m_HasActiveFingerprint = false;
+                }
+            }
 
-            SnapshotSlot slot = m_Slots[m_ActiveSlot];
-            return new Snapshot(slot.handle, slot.mipCount, m_Generation);
+        #if UNITY_EDITOR
+            if (snapshot.IsValid)
+                m_EditorRenderAttempts = 0;
+            else if (!IsBakeRunning())
+                RequestEditorRender();
+        #endif
+            return snapshot;
         }
 
         private void RefreshSceneState()
@@ -799,32 +821,13 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             if (sceneHandle == m_SceneHandle)
                 return;
 
-            // An additive scene becoming active changes the global RenderSettings/default
-            // reflection. Reject the newest source from the previous active scene so Unity cannot
-            // briefly republish it as the new scene's environment while lighting data settles.
-            RejectCurrentSource();
-
             m_SceneHandle = sceneHandle;
             m_LightingRevision++;
-            m_LightingDataCleared = false;
+        #if UNITY_EDITOR
+            m_EditorRenderAttempts = 0;
+        #endif
             ReleaseSnapshots();
-        }
-
-        private void RejectCurrentSource()
-        {
-            if (m_HasPendingFingerprint)
-                m_RejectedFingerprint = m_PendingFingerprint;
-            else if (m_HasCandidateFingerprint)
-                m_RejectedFingerprint = m_CandidateFingerprint;
-            else if (m_HasActiveFingerprint)
-                m_RejectedFingerprint = m_ActiveFingerprint;
-            else
-            {
-                m_HasRejectedFingerprint = false;
-                return;
-            }
-
-            m_HasRejectedFingerprint = true;
+            RequestEditorRender();
         }
 
         private void CompletePendingUpdate()
@@ -833,10 +836,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 return;
 
             bool sourceStillMatches = TryCaptureSource(out _, out SourceFingerprint fingerprint, out _)
-                && fingerprint.Equals(m_PendingFingerprint)
-                && !IsRejected(fingerprint);
+                && fingerprint.Equals(m_PendingFingerprint);
+            SnapshotSlot pendingSlot = m_PendingSlot >= 0 ? m_Slots[m_PendingSlot] : null;
+            bool pendingSnapshotValid = pendingSlot != null
+                && new Snapshot(pendingSlot.handle, pendingSlot.mipCount, m_Generation).IsValid;
 
-            if (sourceStillMatches)
+            if (sourceStillMatches && pendingSnapshotValid)
             {
                 m_ActiveSlot = m_PendingSlot;
                 m_ActiveFingerprint = m_PendingFingerprint;
@@ -857,8 +862,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             fingerprint = default;
             hdrDecodeValues = default;
 
-            if (IsBakeRunning() || m_LightingDataCleared
-                || !TryCaptureSource(out source, out fingerprint, out hdrDecodeValues) || IsRejected(fingerprint))
+            if (IsBakeRunning() || !TryCaptureSource(out source, out fingerprint, out hdrDecodeValues))
                 return false;
 
             if (m_HasActiveFingerprint && fingerprint.Equals(m_ActiveFingerprint))
@@ -872,6 +876,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 m_CandidateFingerprint = fingerprint;
                 m_HasCandidateFingerprint = true;
                 m_CandidateFirstFrame = Time.renderedFrameCount;
+                RequestEditorRender();
                 return false;
             }
 
@@ -896,11 +901,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             return true;
         }
 
-        private bool IsRejected(SourceFingerprint fingerprint)
-        {
-            return m_HasRejectedFingerprint && fingerprint.HasSameTextureContent(m_RejectedFingerprint);
-        }
-
         private bool IsBakeRunning()
         {
         #if UNITY_EDITOR
@@ -921,24 +921,38 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             m_BakeInProgress = false;
             m_LightingRevision++;
             m_HasCandidateFingerprint = false;
-            m_HasRejectedFingerprint = false;
-            m_LightingDataCleared = false;
+            m_EditorRenderAttempts = 0;
+            RequestEditorRender();
         }
 
         private void OnLightingDataUpdated()
         {
             m_LightingRevision++;
             m_HasCandidateFingerprint = false;
-            m_LightingDataCleared = false;
+            m_EditorRenderAttempts = 0;
+            RequestEditorRender();
         }
 
         private void OnLightingDataCleared()
         {
-            RejectCurrentSource();
-
             m_LightingRevision++;
-            m_LightingDataCleared = true;
-            ReleaseSnapshots();
+            m_HasCandidateFingerprint = false;
+            m_EditorRenderAttempts = 0;
+            RequestEditorRender();
+        }
+
+        private void RequestEditorRender()
+        {
+            if (m_EditorRenderAttempts >= k_MaxEditorRenderAttempts)
+                return;
+
+            m_EditorRenderAttempts++;
+            UnityEditor.EditorApplication.QueuePlayerLoopUpdate();
+            UnityEditor.SceneView.RepaintAll();
+        }
+    #else
+        private void RequestEditorRender()
+        {
         }
     #endif
 
@@ -1067,7 +1081,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private SphericalHarmonicsL2 ambientProbe = new SphericalHarmonicsL2();
         private bool staticAmbientProbeInitialized;
-        private string staticAmbientProbeScenePath;
+        private int staticAmbientProbeSceneHandle = int.MinValue;
+        private int staticAmbientProbeHash;
 
         private const int fibonacciSamplesCount = 64;
         private static readonly float3[] fibonacciSamples = new float3[] {
@@ -1323,21 +1338,57 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 return;
             }
 
-            if (camera.cameraType != CameraType.Game)
+            bool supportsStaticAmbientProbe = camera.cameraType == CameraType.Game;
+        #if UNITY_EDITOR
+            supportsStaticAmbientProbe |= !Application.isPlaying && camera.cameraType == CameraType.SceneView;
+        #endif
+            if (!supportsStaticAmbientProbe)
                 return;
 
-            string scenePath = camera.gameObject.scene.path;
-            if (!staticAmbientProbeInitialized || staticAmbientProbeScenePath != scenePath)
+            UnityEngine.SceneManagement.Scene scene = camera.cameraType == CameraType.Game
+                ? camera.gameObject.scene
+                : UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            Vector3 ambientProbePosition = camera.transform.position;
+        #if UNITY_EDITOR
+            if (!Application.isPlaying && Camera.main != null)
+                ambientProbePosition = Camera.main.transform.position;
+        #endif
+            int sceneHandle = scene.GetHashCode();
+            int ambientProbeHash = GetStaticAmbientProbeHash(mainLight, ambientProbePosition);
+            if (!staticAmbientProbeInitialized || staticAmbientProbeSceneHandle != sceneHandle || staticAmbientProbeHash != ambientProbeHash)
             {
-                ambientProbe = EvaluateAmbientProbe(ambientProbe, pbrSky, mainLight.transform.forward, mainLightColor);
+                ambientProbe = PhysicallyBasedSkyURP.EvaluateAmbientProbe(pbrSky, visualEnvironment, mainLight, ambientProbePosition);
                 staticAmbientProbeInitialized = true;
-                staticAmbientProbeScenePath = scenePath;
+                staticAmbientProbeSceneHandle = sceneHandle;
+                staticAmbientProbeHash = ambientProbeHash;
             }
 
             // Entering Play Mode and loading lighting data can restore the serialized baked
             // probe. Re-publish the cached PBR probe so static ambient remains deterministic.
             if (!AmbientProbesEqual(RenderSettings.ambientProbe, ambientProbe))
                 RenderSettings.ambientProbe = ambientProbe;
+        }
+
+        private int GetStaticAmbientProbeHash(Light mainLight, Vector3 ambientProbePosition)
+        {
+            unchecked
+            {
+                int hash = pbrSky.GetHashCode();
+                hash = hash * 23 + visualEnvironment.planetRadius.GetHashCode();
+                hash = hash * 23 + visualEnvironment.renderingSpace.GetHashCode();
+                hash = hash * 23 + visualEnvironment.centerMode.GetHashCode();
+                hash = hash * 23 + visualEnvironment.planetCenter.GetHashCode();
+                hash = hash * 23 + ambientProbePosition.GetHashCode();
+                hash = hash * 23 + mainLight.transform.forward.GetHashCode();
+                hash = hash * 23 + mainLight.color.GetHashCode();
+                hash = hash * 23 + mainLight.intensity.GetHashCode();
+                hash = hash * 23 + mainLight.useColorTemperature.GetHashCode();
+                hash = hash * 23 + mainLight.colorTemperature.GetHashCode();
+            #if URP_PHYSICAL_LIGHT
+                hash = hash * 23 + (mainLight.GetComponent<AdditionalLightData>() != null).GetHashCode();
+            #endif
+                return hash;
+            }
         }
 
         private static bool AmbientProbesEqual(SphericalHarmonicsL2 lhs, SphericalHarmonicsL2 rhs)
@@ -2111,6 +2162,14 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             bool cameraSpaceSky = visualEnvironment.renderingSpace.value == VisualEnvironment.RenderingSpace.Camera;
 
+            PBSkyFrameResources frameResources = frameData.GetOrCreate<PBSkyFrameResources>();
+            frameResources.multiScatteringLut = multiScatteringLUTTextureHandle;
+            frameResources.skyViewLut = skyViewLUTTextureHandle;
+            frameResources.airSingleScattering = airSingleScatteringTextureHandle;
+            frameResources.aerosolSingleScattering = aerosolSingleScatteringTextureHandle;
+            frameResources.multipleScattering = multipleScatteringTextureHandle;
+            frameResources.groundIrradiance = groundIrradianceTextureHandle;
+
             if (precomputationChanged)
             {
                 using var builder = renderGraph.AddUnsafePass<PassData>($"{profilerTag} (Multiple Scattering)", out var passData);
@@ -2445,6 +2504,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             TextureHandle staticFogSkyTexture = staticFogSky.IsValid
                 ? renderGraph.ImportTexture(staticFogSky.handle)
                 : default;
+
+            PBSkyFrameResources frameResources = frameData.GetOrCreate<PBSkyFrameResources>();
+            frameResources.fogSky = staticFogSkyTexture;
 
             // add an unsafe render pass to the render graph, specifying the name and the data type that will be passed to the ExecutePass function
             using (var builder = renderGraph.AddUnsafePass<PassData>(profilerTag, out var passData))
