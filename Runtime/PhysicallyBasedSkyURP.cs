@@ -291,7 +291,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             // Scatter opaque geometry before clouds are composited. Volumetric clouds apply
             // atmospheric scattering separately in their combine pass using cloud depth.
-            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents - 1
+            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents - 2
         };
 
         m_AtmosphericScatteringPass.lutMaterial = m_PbrSkyLUTMaterial;
