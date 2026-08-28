@@ -1443,12 +1443,22 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 float4 cloud = CloudLayerRender(directionWS, effectiveDistance);
                 if (cloud.a > CLOUD_LAYER_OPACITY_EPSILON)
                 {
+                    PositionInputs positionInput;
+                    ZERO_INITIALIZE(PositionInputs, positionInput);
+                    positionInput.positionWS = GetCameraPositionWS() + directionWS * effectiveDistance;
+                    positionInput.positionNDC = uv;
+                    positionInput.positionSS = uint2(input.positionCS.xy);
+                    // Cloud layers have an explicit distance even though they are rasterized at
+                    // far depth. Mark this as geometry so fog and aerial perspective use it.
+                    positionInput.deviceDepth = 0.5;
+                    positionInput.linearDepth = effectiveDistance
+                        * max(dot(directionWS, GetViewForwardDir()), FLT_EPS);
+
                     half3 atmosphereColor;
                     half3 atmosphereOpacity;
                     EvaluateAtmosphericScattering(
-                        directionWS,
-                        uv,
-                        effectiveDistance,
+                        positionInput,
+                        -directionWS,
                         atmosphereColor,
                         atmosphereOpacity);
                     half3 atmosphereTransmittance = 1.0 - atmosphereOpacity;
