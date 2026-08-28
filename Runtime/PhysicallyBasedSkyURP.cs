@@ -248,8 +248,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             bool isCustomSkyType = visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == (int)VisualEnvironment.SkyType.Custom && visualEnvVolume.customSkyMaterial.value != null;
 
             SetSkybox(isCustomSkyType ? visualEnvVolume.customSkyMaterial.value : m_FallbackSkyMaterial, false);
-            RenderSettings.customReflectionTexture = null;
             RenderSettings.defaultReflectionMode = DefaultReflectionMode.Skybox;
+            RenderSettings.customReflectionTexture = null;
 
             Shader.DisableKeyword(k_DynamicAmbientProbeKeywordName);
 
@@ -462,8 +462,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         // Reset the sky reflection texture
         if (!isDynamicSky && isAmbientModeChanged)
         {
-            RenderSettings.customReflectionTexture = null;
             RenderSettings.defaultReflectionMode = DefaultReflectionMode.Skybox;
+            RenderSettings.customReflectionTexture = null;
 
         #if UNITY_EDITOR
             if (!isInitialSkyUpdate && !Application.isPlaying)
@@ -2982,8 +2982,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 }
 
                 cmd.SetGlobalTexture(glossyEnvironmentCubeMap, probeColorHandle);
-                RenderSettings.defaultReflectionMode = isDynamicAmbientMode ? DefaultReflectionMode.Custom : RenderSettings.defaultReflectionMode;
-                RenderSettings.customReflectionTexture = isDynamicAmbientMode ? probeColorHandle : null;
+                if (isDynamicAmbientMode)
+                {
+                    RenderSettings.customReflectionTexture = probeColorHandle;
+                    RenderSettings.defaultReflectionMode = DefaultReflectionMode.Custom;
+                }
                 cmd.SetGlobalVector(worldSpaceCameraPos, cameraPositionWS);
                 cmd.SetGlobalFloat(disableSunDisk, 0.0f);
 
@@ -3095,8 +3098,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 }
             }
 
-            RenderSettings.defaultReflectionMode = data.isDynamicAmbientMode ? DefaultReflectionMode.Custom : RenderSettings.defaultReflectionMode;
-            RenderSettings.customReflectionTexture = data.isDynamicAmbientMode ? data.probeColorHandle : null;
+            if (data.isDynamicAmbientMode)
+            {
+                RenderSettings.customReflectionTexture = data.probeColorHandle;
+                RenderSettings.defaultReflectionMode = DefaultReflectionMode.Custom;
+            }
             context.cmd.SetGlobalVector(worldSpaceCameraPos, data.cameraPositionWS);
             context.cmd.SetGlobalFloat(disableSunDisk, 0.0f);
 
@@ -3118,6 +3124,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         // Each ScriptableRenderPass can use the RenderGraph handle to add multiple render passes to the render graph
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
+            // The pass may have been enqueued before an Inspector change switched the
+            // environment to Static. UpdateSkySettings owns that transition.
+            if (visualEnvironment.skyAmbientMode.value != VisualEnvironment.SkyAmbientMode.Dynamic)
+                return;
+
             // add an unsafe render pass to the render graph, specifying the name and the data type that will be passed to the ExecutePass function
             using (var builder = renderGraph.AddUnsafePass<PassData>(profilerTag, out var passData))
             {
