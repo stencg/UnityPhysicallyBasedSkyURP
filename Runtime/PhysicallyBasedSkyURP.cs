@@ -2791,7 +2791,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private RTHandle probeColorHandle;
         private RTHandle skyColorHandle;
 
-        internal Texture environmentTexture => probeColorHandle;
+        // The pass can be queried between disposal and cubemap reallocation.
+        internal Texture environmentTexture => probeColorHandle?.rt;
 
         // TODO: expose this property
         private static readonly int reflectionResolution = 128;
@@ -3227,7 +3228,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         public void Dispose()
         {
             probeColorHandle?.Release();
+            probeColorHandle = null;
             skyColorHandle?.Release();
+            skyColorHandle = null;
         }
 
         #endregion
