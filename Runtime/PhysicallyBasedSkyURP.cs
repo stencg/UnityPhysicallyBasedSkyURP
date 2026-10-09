@@ -50,6 +50,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
     private PBSkyPrePass m_PBSkyPrePass;
     private SkyViewLUTPass m_SkyViewLUTPass;
+    private GeometryAtmospherePass m_GeometryAtmospherePass;
     private AtmosphericScatteringPass m_AtmosphericScatteringPass;
     private AmbientProbePass m_AmbientProbePass;
     private PBSkyPostPass m_PBSkyPostPass;
@@ -275,6 +276,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         m_SkyViewLUTPass.lutMaterial = m_PbrSkyLUTMaterial;
 
+        m_GeometryAtmospherePass ??= new GeometryAtmospherePass
+        {
+            renderPassEvent = RenderPassEvent.AfterRenderingPrePasses + 1
+        };
+
         m_AtmosphericScatteringPass ??= new AtmosphericScatteringPass(m_PbrSkyLUTMaterial, m_StaticFogSkyCache)
         {
             // Scatter opaque geometry before clouds are composited. Volumetric clouds apply
@@ -354,6 +360,12 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 m_SkyViewLUTPass.celestialBodyData = m_PBSkyPrePass.celestialBodyData;
 
                 renderer.EnqueuePass(m_SkyViewLUTPass);
+                if (pbrSkyVolume.atmosphericScattering.value && renderingData.cameraData.camera.cameraType != CameraType.Reflection)
+                {
+                    m_GeometryAtmospherePass.environment = visualEnvVolume;
+                    m_GeometryAtmospherePass.sky = pbrSkyVolume;
+                    renderer.EnqueuePass(m_GeometryAtmospherePass);
+                }
             }
 
             if (hasFog && renderingData.cameraData.camera.cameraType != CameraType.Reflection)
@@ -388,6 +400,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         if (m_SkyViewLUTPass != null)
             m_SkyViewLUTPass.Dispose();
+
+        m_GeometryAtmospherePass?.Dispose();
+        m_GeometryAtmospherePass = null;
 
         if (m_AtmosphericScatteringPass != null)
             m_AtmosphericScatteringPass.Dispose();
@@ -1208,6 +1223,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 cmd.SetGlobalVector(_MainLightColor, float4(mainLightColor, 0.0f));
                 cmd.EnableShaderKeyword(PHYSICALLY_BASED_SKY);
                 cmd.EnableShaderKeyword(SKY_NOT_BAKING);
+                cmd.SetGlobalInt(GeometryAtmospherePass.AvailableId, 0);
                 cmd.SetGlobalFloat(_EnableAtmosphericScattering, pbrSky.atmosphericScattering.value ? 1.0f : 0.0f);
             }
 
@@ -1253,6 +1269,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             cmd.SetGlobalVector(_MainLightColor, data.mainLightColor);
             cmd.EnableShaderKeyword(PHYSICALLY_BASED_SKY);
             cmd.EnableShaderKeyword(SKY_NOT_BAKING);
+            cmd.SetGlobalInt(GeometryAtmospherePass.AvailableId, 0);
             cmd.SetGlobalFloat(_EnableAtmosphericScattering, data.enableAtmosphericScattering ? 1.0f : 0.0f);
             cmd.SetGlobalVector(_PBRSkyCameraPosPS, data.cameraAtmosphereData.cameraPositionPS);
             cmd.SetGlobalVector(_PlanetCenterRadius, data.cameraAtmosphereData.planetCenterRadius);
@@ -2745,6 +2762,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             using (new ProfilingScope(cmd, m_ProfilingSampler))
             {
+                cmd.SetGlobalInt(GeometryAtmospherePass.AvailableId, 0);
                 cmd.SetGlobalFloat(_EnableAtmosphericScattering, 0.0f);
                 cmd.SetGlobalInteger(_FogEnabled, 0);
                 cmd.SetGlobalFloat(_SkyTextureMipCounts, 0.0f);
@@ -2772,6 +2790,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         {
             CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
+            cmd.SetGlobalInt(GeometryAtmospherePass.AvailableId, 0);
             cmd.SetGlobalFloat(_EnableAtmosphericScattering, 0.0f);
             cmd.SetGlobalInteger(_FogEnabled, 0);
             cmd.SetGlobalFloat(_SkyTextureMipCounts, 0.0f);

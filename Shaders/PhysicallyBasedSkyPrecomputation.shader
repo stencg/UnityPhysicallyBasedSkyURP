@@ -642,7 +642,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 float3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
 
                 half3 volColor, volOpacity = 0.0;
-                EvaluateAtmosphericScattering(posInput, V, volColor, volOpacity);
+                EvaluateGeometryAtmosphericScattering(posInput, V, volColor, volOpacity);
 
 
                 // We use hardware blend options for better performance
@@ -1546,7 +1546,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 float3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
 
                 half3 color, opacity;
-                EvaluateAtmosphericScattering(posInput, V, color, opacity);
+                EvaluateGeometryAtmosphericScattering(posInput, V, color, opacity);
                 return half4(color, 1.0h - Min3(opacity.x, opacity.y, opacity.z));
             }
             ENDHLSL

@@ -14,6 +14,8 @@ public sealed class PBSkyFrameResources : ContextItem
     public TextureHandle aerosolSingleScattering = TextureHandle.nullHandle;
     public TextureHandle multipleScattering = TextureHandle.nullHandle;
     public TextureHandle groundIrradiance = TextureHandle.nullHandle;
+    public TextureHandle geometryRadiance = TextureHandle.nullHandle;
+    public TextureHandle geometryTransmission = TextureHandle.nullHandle;
     public TextureHandle fogSky = TextureHandle.nullHandle;
 
     public override void Reset()
@@ -24,6 +26,8 @@ public sealed class PBSkyFrameResources : ContextItem
         aerosolSingleScattering = TextureHandle.nullHandle;
         multipleScattering = TextureHandle.nullHandle;
         groundIrradiance = TextureHandle.nullHandle;
+        geometryRadiance = TextureHandle.nullHandle;
+        geometryTransmission = TextureHandle.nullHandle;
         fogSky = TextureHandle.nullHandle;
     }
 }

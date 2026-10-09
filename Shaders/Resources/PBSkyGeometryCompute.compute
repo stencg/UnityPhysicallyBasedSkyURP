@@ -1,0 +1,43 @@
+#pragma kernel Generate
+#pragma kernel Filter
+#include "../GeometryAtmosphereIntegration.hlsl"
+RWTexture3D<float4> _PBSkyGeometryRadianceRW;
+RWTexture3D<float4> _PBSkyGeometryTransmissionRW;
+RWTexture3D<float4> _PBSkyGeometryFilteredRW;
+Texture3D<float4> _PBSkyGeometryRadianceSource;
+
+[numthreads(8, 8, 1)]
+void Generate(uint3 id : SV_DispatchThreadID)
+{
+    uint eye = id.x / PBSKY_GEOMETRY_WIDTH;
+    if (eye >= (uint)_PBSkyGeometryEyeCount || id.y >= PBSKY_GEOMETRY_WIDTH) return;
+    float2 uv = (float2(id.x % PBSKY_GEOMETRY_WIDTH, id.y) + 0.5) / PBSKY_GEOMETRY_WIDTH;
+    float3 O, V; float entry, exitDistance;
+    PBSkyGeometryRay(uv, eye, O, V, entry, exitDistance);
+    float3 radiance = 0.0, transmission = 1.0;
+    _PBSkyGeometryRadianceRW[uint3(id.xy, 0)] = float4(0, 0, 0, 1);
+    _PBSkyGeometryTransmissionRW[uint3(id.xy, 0)] = 1.0;
+    for (uint s = 1; s < PBSKY_GEOMETRY_DEPTH; s++)
+    {
+        PBSkyGeometryStep(O, V, min(PBSkyGeometryDistance(s - 1), exitDistance),
+            min(PBSkyGeometryDistance(s), exitDistance), radiance, transmission);
+        _PBSkyGeometryRadianceRW[uint3(id.xy, s)] = float4(radiance, 1);
+        _PBSkyGeometryTransmissionRW[uint3(id.xy, s)] = float4(transmission, 1);
+    }
+}
+
+[numthreads(8, 8, 1)]
+void Filter(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)(_PBSkyGeometryEyeCount * PBSKY_GEOMETRY_WIDTH) || id.y >= PBSKY_GEOMETRY_WIDTH) return;
+    int eyeStart = (id.x / PBSKY_GEOMETRY_WIDTH) * PBSKY_GEOMETRY_WIDTH;
+    float4 sum = 0.0;
+    for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++)
+    {
+        int2 pixel = clamp(int2(id.xy) + int2(x,y), int2(eyeStart,0), int2(eyeStart+31,31));
+        float weight = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
+        sum += _PBSkyGeometryRadianceSource.Load(int4(pixel, id.z, 0)) * weight;
+    }
+    _PBSkyGeometryFilteredRW[id] = sum / 16.0;
+}
