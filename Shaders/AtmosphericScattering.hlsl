@@ -12,12 +12,12 @@
 //#define OPAQUE_FOG_PASS
 //#define ATMOSPHERE_NO_AERIAL_PERSPECTIVE
 
-// [Do NOT enable] Precomputed Atmospheric Scattering
-// [Reason] No significant performance improvement was observed on URP while losing visual quality.
-#define SHADEROPTIONS_PRECOMPUTED_ATMOSPHERIC_ATTENUATION (0) // This feature is disabled on the CPU side
-
 #define FOGCOLORMODE_CONSTANT_COLOR (0)
 #define FOGCOLORMODE_SKY_COLOR (1)
+
+#define FOGSKYSOURCE_DYNAMIC (0)
+#define FOGSKYSOURCE_STATIC (1)
+#define FOGSKYSOURCE_AMBIENT_PROBE (2)
 
 #define _MipFogNear         _MipFogParameters.x
 #define _MipFogFar          _MipFogParameters.y
@@ -25,6 +25,9 @@
 
 TEXTURECUBE(_SkyTexture);
 half _SkyTextureMipCounts;
+TEXTURECUBE(_FogSkyTexture);
+half _FogSkyTextureMipCount;
+half _FogSkySourceMode;
 half4 _FogSHAr;
 half4 _FogSHAg;
 half4 _FogSHAb;
@@ -48,8 +51,9 @@ half3 GetFogColor(half3 V, float fragDist)
     if (_FogColorMode == FOGCOLORMODE_SKY_COLOR)
     {
         // Based on Uncharted 4 "Mip Sky Fog" trick: http://advances.realtimerendering.com/other/2016/naughty_dog/NaughtyDog_TechArt_Final.pdf
-        half mimMip = _SkyTextureMipCounts == 0.0 ? 7.0 - 1.0 : _SkyTextureMipCounts - 1.0;
-        half mipLevel = (1.0 - _MipFogMaxMip * saturate((fragDist - _MipFogNear) / (_MipFogFar - _MipFogNear))) * (mimMip);
+        half mipCount = _FogSkySourceMode == FOGSKYSOURCE_STATIC ? _FogSkyTextureMipCount : _SkyTextureMipCounts;
+        half maxMip = max(0.0, mipCount - 1.0);
+        half mipLevel = (1.0 - _MipFogMaxMip * saturate((fragDist - _MipFogNear) / (_MipFogFar - _MipFogNear))) * maxMip;
         
         //half3 viewColor = SAMPLE_TEXTURECUBE_LOD(_SkyTexture, s_trilinear_clamp_sampler, -V, mipLevel).rgb; // '_FogColor' is the tint
         
@@ -67,11 +71,15 @@ half3 GetFogColor(half3 V, float fragDist)
 
         half3 viewColor;
         UNITY_BRANCH
-        if (_SkyTextureMipCounts == 0.0)
+        if (_FogSkySourceMode == FOGSKYSOURCE_AMBIENT_PROBE)
         {
-            // Static PBR sky publishes its ambient probe directly. Unlike the baked reflection
-            // cubemap, this remains valid after scene loads and ambient-mode changes.
+            // Keep fog valid while Unity loads or regenerates the baked reflection.
             viewColor = max(0.0, EvaluateFogAmbientProbe(-V));
+        }
+        else if (_FogSkySourceMode == FOGSKYSOURCE_STATIC)
+        {
+            // The cached static reflection is already convolved and HDR-decoded.
+            viewColor = SAMPLE_TEXTURECUBE_LOD(_FogSkyTexture, s_trilinear_clamp_sampler, -V, mipLevel).rgb;
         }
         else
         {
@@ -293,34 +301,48 @@ void EvaluatePbrAtmosphere(float3 positionPS, float3 V, float distAlongRay, bool
     }
 }
 
-void EvaluateAtmosphericScattering(half3 V, float2 positionNDC, float tFrag, out half3 skyColor, out half3 skyOpacity)
+TEXTURE3D(_PBSkyGeometryRadiance);
+TEXTURE3D(_PBSkyGeometryTransmission);
+int _PBSkyGeometryAvailable;
+int _PBSkyGeometryEyeCount;
+float4 _PBSkyGeometryUpRadius[2];
+float4 _PBSkyGeometryOriginPS[2];
+
+void EvaluateGeometryAtmosphericScattering(float3 V, float2 positionNDC, float tFrag, out half3 skyColor, out half3 skyOpacity)
 {
-#if SHADEROPTIONS_PRECOMPUTED_ATMOSPHERIC_ATTENUATION
-    EvaluateCameraAtmosphericScattering(V, positionNDC, tFrag, skyColor, skyOpacity);
-#else
-    #ifdef LOCAL_SKY
-    float3 O = _PBRSkyCameraPosPS;
-    #else
-    float3 O = GetCameraPositionWS() - _PlanetCenterPosition;
-    #endif
-    EvaluatePbrAtmosphere(O, -V, tFrag, false, skyColor, skyOpacity);
-    skyColor *= _IntensityMultiplier;
+    skyColor = skyOpacity = 0;
+    if (_PBSkyGeometryAvailable == 0 || tFrag <= 0) return;
+    uint eye = 0;
+#if defined(UNITY_STEREO_INSTANCING_ENABLED) || defined(UNITY_STEREO_MULTIVIEW_ENABLED)
+    eye = min((uint)unity_StereoEyeIndex, (uint)(_PBSkyGeometryEyeCount - 1));
 #endif
+    float r = _PBSkyGeometryUpRadius[eye].w;
+    float cosChi = dot(_PBSkyGeometryUpRadius[eye].xyz, V);
+    float entry = max(IntersectSphere(_AtmosphericRadius, cosChi, r).x, 0.0);
+    float distance = max(tFrag - entry, 0.0);
+    if (distance <= 0.0) return;
+    float slice = sqrt(saturate(distance / 128000.0)) * 63.0;
+    float2 uv = clamp(positionNDC, 0.5 / 32.0, 1.0 - 0.5 / 32.0);
+    uv.x = (uv.x + eye) / max(_PBSkyGeometryEyeCount, 1);
+    float3 uvw = float3(uv, (slice + 0.5) / 64.0);
+    skyColor = SAMPLE_TEXTURE3D_LOD(_PBSkyGeometryRadiance, s_linear_clamp_sampler, uvw, 0).rgb;
+    skyOpacity = 1.0 - saturate(SAMPLE_TEXTURE3D_LOD(_PBSkyGeometryTransmission, s_linear_clamp_sampler, uvw, 0).rgb);
+    AtmosphereArtisticOverride(ComputeCosineOfHorizonAngle(r), cosChi, skyColor, skyOpacity);
+    skyColor *= _IntensityMultiplier;
 }
 
-void ApplyAtmosphericScatteringToSky(float3 V, float2 positionNDC, inout float3 color)
+// Preserve the established atmosphere evaluation for clouds and other integrations.
+// Opaque geometry and TransparentFog explicitly select the continuous geometry lookup.
+void EvaluateAtmosphericScattering(half3 V, float2 positionNDC, float tFrag, out half3 skyColor, out half3 skyOpacity)
 {
-    if (_PBRFogEnabled)
-    {
-        half3 scatteringColor, scatteringOpacity;
-        // Trace to the atmosphere exit instead of using the Fog volume's finite fallback distance.
-        EvaluateAtmosphericScattering(-V, positionNDC, FLT_INF, scatteringColor, scatteringOpacity);
-        color = scatteringColor + (1.0 - scatteringOpacity) * color;
-    }
+    // Keep the existing lifted camera origin for cloud passes too.
+    float3 O = _PBRSkyCameraPosPS;
+    EvaluatePbrAtmosphere(O, -V, tFrag, false, skyColor, skyOpacity);
+    skyColor *= _IntensityMultiplier;
 }
 
 // Returns false when fog is not applied
-bool EvaluateAtmosphericScattering(PositionInputs posInput, half3 V, out half3 color, out half3 opacity)
+bool EvaluateAtmosphericScatteringInternal(PositionInputs posInput, float3 V, bool geometry, out half3 color, out half3 opacity)
 {
     color = opacity = 0;
 
@@ -385,13 +407,15 @@ bool EvaluateAtmosphericScattering(PositionInputs posInput, half3 V, out half3 c
     }
 
 #ifndef ATMOSPHERE_NO_AERIAL_PERSPECTIVE
-    // Sky pass already applies atmospheric scattering to the far plane.
-    // This pass only handles geometry.
+    // The sky shader already evaluates the atmosphere. This pass only handles geometry.
     if (_PBRFogEnabled && !isSky)
     {
         half3 skyColor = 0, skyOpacity = 0;
 
-        EvaluateAtmosphericScattering(-V, posInput.positionNDC, tFrag, skyColor, skyOpacity);
+        if (geometry)
+            EvaluateGeometryAtmosphericScattering(-V, posInput.positionNDC, tFrag, skyColor, skyOpacity);
+        else
+            EvaluateAtmosphericScattering(-V, posInput.positionNDC, tFrag, skyColor, skyOpacity);
 
         // Rendering of fog and atmospheric scattering cannot really be decoupled.
         #if 0
@@ -434,6 +458,17 @@ bool EvaluateAtmosphericScattering(PositionInputs posInput, half3 V, out half3 c
 
     return true;
 }
+
+bool EvaluateAtmosphericScattering(PositionInputs posInput, half3 V, out half3 color, out half3 opacity)
+{
+    return EvaluateAtmosphericScatteringInternal(posInput, V, false, color, opacity);
+}
+
+bool EvaluateGeometryAtmosphericScattering(PositionInputs posInput, float3 V, out half3 color, out half3 opacity)
+{
+    return EvaluateAtmosphericScatteringInternal(posInput, V, true, color, opacity);
+}
+
 #endif
 
 #endif // URP_ATMOSPHERIC_SCATTERING_INCLUDED

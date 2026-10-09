@@ -8,7 +8,13 @@ void PBSFogEvaluateTransparent(float3 positionWS, float2 screenUV, out half3 fog
 {
     float3 cameraToFragment = positionWS - GetCameraPositionWS();
     float fragmentDistance = length(cameraToFragment);
-    half3 viewDirectionWS = -cameraToFragment * rcp(max(fragmentDistance, FLT_EPS));
+    if (fragmentDistance <= FLT_EPS)
+    {
+        fogColor = 0;
+        transmittance = 1;
+        return;
+    }
+    float3 viewDirectionWS = -cameraToFragment * rcp(max(fragmentDistance, FLT_EPS));
 
     PositionInputs positionInput;
     ZERO_INITIALIZE(PositionInputs, positionInput);
@@ -21,7 +27,7 @@ void PBSFogEvaluateTransparent(float3 positionWS, float2 screenUV, out half3 fog
     positionInput.linearDepth = fragmentDistance * dot(-viewDirectionWS, GetViewForwardDir());
 
     half3 fogOpacity;
-    EvaluateAtmosphericScattering(positionInput, viewDirectionWS, fogColor, fogOpacity);
+    EvaluateGeometryAtmosphericScattering(positionInput, viewDirectionWS, fogColor, fogOpacity);
     transmittance = 1.0 - fogOpacity;
 }
 

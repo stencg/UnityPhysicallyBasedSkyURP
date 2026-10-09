@@ -76,7 +76,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             TEXTURECUBE(_SpaceEmissionTexture);
             half4 _SpaceEmissionTexture_HDR;
 
-            float4 RenderSky(float2 screenUV, float3 positionWS)
+            float4 RenderSky(float3 positionWS)
             {
                 const float R = _PlanetaryRadius;
 
@@ -205,7 +205,6 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
                 skyColor += radiance * (1 - skyOpacity);
                 skyColor *= _IntensityMultiplier;
-                ApplyAtmosphericScatteringToSky(V, screenUV, skyColor);
 
                 return float4(skyColor, 1.0);
             }
@@ -213,9 +212,8 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             float4 frag(Varyings input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
-                float2 screenUV = GetNormalizedScreenSpaceUV(input.positionCS);
 
-                float4 color = RenderSky(screenUV, input.positionWS);
+                float4 color = RenderSky(input.positionWS);
                 return color;
             }
             ENDHLSL
@@ -243,8 +241,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             struct CustomVaryings
             {
                 float4 positionCS : SV_POSITION;
-                float2 texcoord : TEXCOORD0;
-                float3 positionWS : TEXCOORD1;
+                float3 positionWS : TEXCOORD0;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -259,13 +256,13 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
                 output.positionCS = pos;
             #if UNITY_VERSION < 202320
-                output.texcoord = uv * _BlitScaleBias.xy + _BlitScaleBias.zw;
+                float2 texcoord = uv * _BlitScaleBias.xy + _BlitScaleBias.zw;
             #else
-                output.texcoord = DYNAMIC_SCALING_APPLY_SCALEBIAS(uv);
+                float2 texcoord = DYNAMIC_SCALING_APPLY_SCALEBIAS(uv);
             #endif
 
                 // Calculate the virtual position of skybox for view direction calculation
-                output.positionWS = ComputeWorldSpacePosition(output.texcoord, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP);
+                output.positionWS = ComputeWorldSpacePosition(texcoord, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP);
 
                 return output;
             }
@@ -288,7 +285,7 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             TEXTURECUBE(_SpaceEmissionTexture);
             half4 _SpaceEmissionTexture_HDR;
 
-            float4 RenderSky(float2 screenUV, float3 positionWS)
+            float4 RenderSky(float3 positionWS)
             {
                 const float R = _PlanetaryRadius;
                 const float3 V = normalize(GetCameraPositionWS() - positionWS);
@@ -409,7 +406,6 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
 
                 skyColor += radiance * (1 - skyOpacity);
                 skyColor *= _IntensityMultiplier;
-                ApplyAtmosphericScatteringToSky(V, screenUV, skyColor);
 
                 return float4(skyColor, 1.0);
             }
@@ -417,9 +413,8 @@ Shader "Hidden/Skybox/PhysicallyBasedSky"
             float4 frag(CustomVaryings input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
-                float2 screenUV = input.texcoord;
 
-                float4 color = RenderSky(screenUV, input.positionWS);
+                float4 color = RenderSky(input.positionWS);
                 return color;
             }
             ENDHLSL

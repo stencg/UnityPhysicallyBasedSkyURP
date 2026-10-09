@@ -16,6 +16,10 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
         // Pass 3: Ground Irradiance Precomputation (World Space)
         // Pass 4: Opaque Atmospheric Scattering
         // Pass 5: Precomputed Atmospheric Scattering (Currently Unused)
+        // Pass 6: Static Fog Environment Snapshot
+        // Pass 7: Volumetric Clouds Combine
+        // Pass 8: Cloud Layer Combine
+        // Pass 9: Opaque Atmospheric Scattering MSAA (Render Graph)
 
         Pass
         {
@@ -598,7 +602,6 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
 
             #pragma multi_compile_local_fragment _ LOCAL_SKY
             #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
-            #pragma multi_compile_local_fragment _ _FOG_DEPTH_EDGE_ANTIALIASING
 
             #pragma multi_compile_fragment _ PHYSICALLY_BASED_SKY
             #pragma multi_compile_fragment _ DEBUG_DISPLAY
@@ -639,34 +642,8 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 float3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
 
                 half3 volColor, volOpacity = 0.0;
-                EvaluateAtmosphericScattering(posInput, V, volColor, volOpacity);
+                EvaluateGeometryAtmosphericScattering(posInput, V, volColor, volOpacity);
 
-            #if defined(_FOG_DEPTH_EDGE_ANTIALIASING)
-                if (abs(depth - UNITY_RAW_FAR_CLIP_VALUE) > 1e-6)
-                {
-                    int2 screenSize = int2(_ScreenResolution.xy);
-                    int2 offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
-                    int skyNeighborCount = 0;
-                    for (int i = 0; i < 4; i++)
-                    {
-                        int2 neighborCoords = clamp(pixelCoords + offsets[i], int2(0, 0), screenSize - 1);
-                        float neighborDepth = LOAD_TEXTURE2D_X_LOD(_CameraDepthTexture, neighborCoords, 0).r;
-                        if (abs(neighborDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6)
-                            skyNeighborCount++;
-                    }
-
-                    if (skyNeighborCount > 0)
-                    {
-                        PositionInputs skyPosInput = GetPositionInput(input.positionCS.xy, _ScreenResolution.zw, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
-                        half3 skyFogColor, skyFogOpacity = 0.0;
-                        EvaluateAtmosphericScattering(skyPosInput, V, skyFogColor, skyFogOpacity);
-
-                        half skyCoverage = skyNeighborCount * 0.2h;
-                        volColor = lerp(volColor, skyFogColor, skyCoverage);
-                        volOpacity = lerp(volOpacity, skyFogOpacity, skyCoverage);
-                    }
-                }
-            #endif
 
                 // We use hardware blend options for better performance
                 half atmosphericOpacity = 1.0 - Min3(volOpacity.x, volOpacity.y, volOpacity.z);
@@ -880,6 +857,697 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 skyColor += LOAD_TEXTURE2D_LOD(_AtmosphericScatteringSlice, pixelCoords, 0).rgb;
                 
                 return;
+            }
+            ENDHLSL
+        }
+
+        // Pass 6: Static Fog Environment Snapshot
+        // Static mip fog cannot safely sample ReflectionProbe.defaultTexture directly because Unity
+        // may replace or update it while scenes and baked lighting data load. Decode its convolved
+        // mip chain into the package-owned, resolution-capped linear-HDR cubemap used by all cameras.
+        Pass
+        {
+            Name "Static Fog Environment Snapshot"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            HLSLPROGRAM
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Sampling/Sampling.hlsl"
+
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma target 3.5
+
+            TEXTURECUBE(_FogSkyCopySource);
+            float4 _FogSkyCopySource_HDR;
+            float _FogSkyCopyMip;
+            int _FogSkyCopyFace;
+
+            struct StaticFogVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 texcoord : TEXCOORD0;
+                UNITY_VERTEX_OUTPUT_STEREO
+            };
+
+            StaticFogVaryings vert(Attributes input)
+            {
+                StaticFogVaryings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+                float4 positionCS = GetFullScreenTriangleVertexPosition(input.vertexID);
+                float2 uv = GetFullScreenTriangleTexCoord(input.vertexID);
+                output.positionCS = positionCS;
+                output.texcoord = uv;
+                return output;
+            }
+
+            float4 frag(StaticFogVaryings input) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                float3 directionWS = CubemapTexelToDirection(input.texcoord * 2.0 - 1.0, (uint)_FogSkyCopyFace);
+                float4 encodedEnvironment = SAMPLE_TEXTURECUBE_LOD(
+                    _FogSkyCopySource,
+                    sampler_LinearClamp,
+                    directionWS,
+                    _FogSkyCopyMip);
+                return float4(DecodeHDREnvironment(encodedEnvironment, _FogSkyCopySource_HDR), 1.0);
+            }
+            ENDHLSL
+        }
+
+        // This pass intentionally lives in PBSky rather than the optional clouds package. It is
+        // therefore compiled whenever PBSky is installed and does not depend on ShaderLab
+        // PackageRequirements, which can omit optional passes for local packages on Android.
+        Pass
+        {
+            Name "Volumetric Clouds - Combine with PBSky Scattering"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            Blend One SrcAlpha, Zero One
+
+            HLSLPROGRAM
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+
+            #pragma vertex Vert
+            #pragma fragment frag
+            #pragma target 3.5
+
+            #pragma multi_compile_local_fragment _ _LOW_RESOLUTION_CLOUDS
+            #pragma multi_compile_local_fragment _ _OUTPUT_CLOUDS_DEPTH
+            #pragma multi_compile_local_fragment _ _DEPTH_AWARE_CLOUD_EDGE_FILTER
+            #pragma multi_compile_local_fragment _ _DEPTH_AWARE_CLOUD_EDGE_FILTER_DEBUG
+
+            TEXTURE2D_X(_VolumetricCloudsLightingTexture);
+            float4 _VolumetricCloudsLightingTexture_TexelSize;
+            TEXTURE2D_X_FLOAT(_VolumetricCloudsDepthTexture);
+            SAMPLER(s_point_clamp_sampler);
+
+            float4 _ScreenResolution;
+            float _DepthAwareCloudEdgeFilterWidth;
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "./PhysicallyBasedSkyRendering.hlsl"
+            #include "./PhysicallyBasedSkyEvaluation.hlsl"
+            #define OPAQUE_FOG_PASS
+            #include "./AtmosphericScattering.hlsl"
+
+            #define RAW_FAR_CLIP_THRESHOLD 1e-6
+            #define CLOUDS_RAW_FAR_CLIP_VALUE UNITY_RAW_FAR_CLIP_VALUE ? (UNITY_RAW_FAR_CLIP_VALUE - RAW_FAR_CLIP_THRESHOLD) : (UNITY_RAW_FAR_CLIP_VALUE + RAW_FAR_CLIP_THRESHOLD)
+            #define CLOUD_UPSCALE_KERNEL_SIZE 3
+            #define CLOUD_UPSCALE_TOLERANCE 1e-5
+
+            half CloudUpscaleWeight(half distance)
+            {
+                return exp(-distance * distance);
+            }
+
+            half4 BilateralUpscaleClouds(float2 screenUV)
+            {
+                float2 offsetUV = (floor(screenUV * _VolumetricCloudsLightingTexture_TexelSize.zw) + 0.5)
+                    * _VolumetricCloudsLightingTexture_TexelSize.xy;
+                half4 centerColor = SAMPLE_TEXTURE2D_X_LOD(
+                    _VolumetricCloudsLightingTexture, s_linear_clamp_sampler, screenUV, 0);
+                half4 resultColor = 0.0;
+                half normalization = 0.0;
+
+                for (int y = -CLOUD_UPSCALE_KERNEL_SIZE; y <= CLOUD_UPSCALE_KERNEL_SIZE; y++)
+                {
+                    for (int x = -CLOUD_UPSCALE_KERNEL_SIZE; x <= CLOUD_UPSCALE_KERNEL_SIZE; x++)
+                    {
+                        half4 neighborColor = SAMPLE_TEXTURE2D_X_LOD(
+                            _VolumetricCloudsLightingTexture,
+                            s_linear_clamp_sampler,
+                            offsetUV + float2(x, y) * _VolumetricCloudsLightingTexture_TexelSize.xy,
+                            0);
+                        half2 distance = (screenUV - offsetUV) * _ScreenParams.xy;
+                        half colorDifference = length(centerColor - neighborColor);
+                        half weight = CloudUpscaleWeight(length(distance))
+                            * rcp(colorDifference + CLOUD_UPSCALE_TOLERANCE);
+                        resultColor += neighborColor * weight;
+                        normalization += weight;
+                    }
+                }
+
+                return resultColor * rcp(normalization);
+            }
+
+            half4 FilterCloudsAtOpaqueDepthEdges(half4 cloudsColor, float2 screenUV, out bool opaqueEdge)
+            {
+                opaqueEdge = false;
+                float2 texelSize = _CameraDepthTexture_TexelSize.xy * _DepthAwareCloudEdgeFilterWidth;
+                float centerDepth = SampleSceneDepth(screenUV);
+                bool centerIsSky = abs(centerDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6;
+                float2 offsets[4] =
+                {
+                    float2(-texelSize.x, 0.0),
+                    float2(texelSize.x, 0.0),
+                    float2(0.0, -texelSize.y),
+                    float2(0.0, texelSize.y)
+                };
+
+                half4 filteredClouds = cloudsColor;
+                for (int i = 0; i < 4; i++)
+                {
+                    float2 neighborUV = screenUV + offsets[i];
+                    float neighborDepth = SampleSceneDepth(neighborUV);
+                    bool neighborIsSky = abs(neighborDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6;
+                    if (centerIsSky != neighborIsSky)
+                        opaqueEdge = true;
+                    filteredClouds += SAMPLE_TEXTURE2D_X_LOD(
+                        _VolumetricCloudsLightingTexture, s_linear_clamp_sampler, neighborUV, 0);
+                }
+
+                return opaqueEdge ? filteredClouds * 0.2h : cloudsColor;
+            }
+
+            half4 frag(Varyings input) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                float2 screenUV = input.texcoord;
+
+            #ifdef _LOW_RESOLUTION_CLOUDS
+                half4 cloudsColor = BilateralUpscaleClouds(screenUV);
+            #else
+                half4 cloudsColor = SAMPLE_TEXTURE2D_X_LOD(
+                    _VolumetricCloudsLightingTexture, s_linear_clamp_sampler, screenUV, 0);
+            #endif
+
+            #if defined(_DEPTH_AWARE_CLOUD_EDGE_FILTER)
+                bool opaqueEdge;
+                cloudsColor = FilterCloudsAtOpaqueDepthEdges(cloudsColor, screenUV, opaqueEdge);
+                #if defined(_DEPTH_AWARE_CLOUD_EDGE_FILTER_DEBUG)
+                return half4(opaqueEdge ? 1.0 : 0.0, opaqueEdge ? 1.0 : 0.0, opaqueEdge ? 1.0 : 0.0, 1.0);
+                #endif
+            #endif
+
+                if (_EnableAtmosphericScattering || _FogEnabled)
+                {
+                #ifdef _OUTPUT_CLOUDS_DEPTH
+                    float depth = SAMPLE_TEXTURE2D_X_LOD(
+                        _VolumetricCloudsDepthTexture, s_point_clamp_sampler, screenUV, 0).r;
+                    bool edgeOfClouds = depth == UNITY_RAW_FAR_CLIP_VALUE && cloudsColor.a < 1.0;
+                    depth = edgeOfClouds ? CLOUDS_RAW_FAR_CLIP_VALUE : depth;
+                #else
+                    float depth = cloudsColor.a == 1.0 ? UNITY_RAW_FAR_CLIP_VALUE : CLOUDS_RAW_FAR_CLIP_VALUE;
+                #endif
+
+                    PositionInputs posInput = GetPositionInput(
+                        input.positionCS.xy, _ScreenResolution.zw, depth, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+                    half3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
+                    half3 volumeColor;
+                    half3 volumeOpacity;
+                    EvaluateAtmosphericScattering(posInput, V, volumeColor, volumeOpacity);
+                    cloudsColor.xyz = volumeColor * (1.0 - cloudsColor.w)
+                        + (1.0 - volumeOpacity) * cloudsColor.xyz;
+                }
+
+                return cloudsColor;
+            }
+            ENDHLSL
+        }
+
+        // This pass intentionally lives in PBSky rather than the optional clouds package. It is
+        // therefore compiled whenever PBSky is installed and does not depend on ShaderLab
+        // PackageRequirements, which can omit optional passes for local packages on Android.
+        Pass
+        {
+            Name "Cloud Layer - Combine with PBSky Scattering"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            ZWrite Off
+            ZTest Always
+            Blend One OneMinusSrcAlpha
+            Cull Off
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma only_renderers d3d11 playstation xboxone xboxseries vulkan metal switch switch2
+            #pragma vertex VertCloudLayer
+            #pragma fragment FragCloudLayer
+            #pragma multi_compile_instancing
+            #pragma multi_compile_local_fragment _ _PHYSICALLY_BASED_SUN
+            #pragma multi_compile_local_fragment _ _CLOUDS_AMBIENT_PROBE
+            #pragma multi_compile_local_fragment _ _CLOUD_LAYER_DIRECT_MAPS
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "./AtmosphericScattering.hlsl"
+
+            TEXTURE2D_ARRAY(_CloudTexture);
+            SAMPLER(sampler_CloudTexture);
+            TEXTURE2D(_CloudMapA);
+            SAMPLER(sampler_CloudMapA);
+            TEXTURE2D(_CloudMapB);
+            SAMPLER(sampler_CloudMapB);
+            TEXTURE2D(_FlowmapA);
+            SAMPLER(sampler_FlowmapA);
+            TEXTURE2D(_FlowmapB);
+            SAMPLER(sampler_FlowmapB);
+            TEXTURECUBE(_VolumetricCloudsAmbientProbe);
+            SAMPLER(sampler_VolumetricCloudsAmbientProbe);
+
+            float4 _FlowmapParamA;
+            float4 _FlowmapParamB;
+            float4 _CloudMapOpacityA;
+            float4 _CloudMapOpacityB;
+            float2 _CloudMapRotations;
+            float4 _LayerModes;
+            float4 _LayerEnabled;
+            float4 _CloudLayerParamsA;
+            float4 _CloudLayerParamsB;
+            float4 _AmbientParams;
+            float4 _CloudLayerSHAr;
+            float4 _CloudLayerSHAg;
+            float4 _CloudLayerSHAb;
+            float4 _CloudLayerSHBr;
+            float4 _CloudLayerSHBg;
+            float4 _CloudLayerSHBb;
+            float4 _CloudLayerSHC;
+            float3 _SunDirection;
+            float _CloudLayerPlanetaryRadius;
+
+            #define CLOUD_LAYER_OPACITY_EPSILON 1e-4
+
+            float3 _CloudLayerViewRayBottomLeft;
+            float3 _CloudLayerViewRayTopLeft;
+            float3 _CloudLayerViewRayTopRight;
+            float3 _CloudLayerViewRayBottomRight;
+
+        #ifdef _PHYSICALLY_BASED_SUN
+            float CloudLayerComputeCosineOfHorizonAngle(float radialDistance)
+            {
+                float sinHorizon = _CloudLayerPlanetaryRadius / radialDistance;
+                return -sqrt(saturate(1.0 - sinHorizon * sinHorizon));
+            }
+
+            float CloudLayerChapmanUpperApprox(float z, float cosTheta)
+            {
+                float cosineSquared = cosTheta * cosTheta;
+                float numerator = 0.761643 * ((1.0 + 2.0 * z) - cosineSquared * z);
+                float denominator = cosTheta * z
+                    + sqrt(z * (1.47721 + 0.273828 * cosineSquared * z));
+                return 0.5 * cosTheta + numerator / denominator;
+            }
+
+            float CloudLayerChapmanHorizontal(float z)
+            {
+                float inverseSqrtZ = rsqrt(z);
+                return 0.626657 * (inverseSqrtZ + 2.0 * z * inverseSqrtZ);
+            }
+
+            float3 CloudLayerComputeAtmosphericOpticalDepth(
+                float radialDistance, float cosTheta)
+            {
+                const float2 scaleHeight = float2(8000.0, 1200.0);
+                const float2 densityFalloff = rcp(scaleHeight);
+                float2 z = densityFalloff * radialDistance;
+                float2 planetZ = densityFalloff * _CloudLayerPlanetaryRadius;
+                float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+                float2 chapman;
+                chapman.x = CloudLayerChapmanUpperApprox(z.x, abs(cosTheta))
+                    * exp(planetZ.x - z.x);
+                chapman.y = CloudLayerChapmanUpperApprox(z.y, abs(cosTheta))
+                    * exp(planetZ.y - z.y);
+
+                if (cosTheta < 0.0)
+                {
+                    float2 horizonZ = z * sinTheta;
+                    float2 horizontalChapman;
+                    horizontalChapman.x = 2.0 * CloudLayerChapmanHorizontal(horizonZ.x);
+                    horizontalChapman.y = 2.0 * CloudLayerChapmanHorizontal(horizonZ.y);
+                    chapman = horizontalChapman * exp(planetZ - horizonZ) - chapman;
+                }
+
+                float2 opticalDepth = chapman * scaleHeight;
+                const float3 airSeaLevelExtinction = float3(5.8, 13.5, 33.1) / 1000000.0;
+                const float aerosolSeaLevelExtinction = 0.00001;
+                return opticalDepth.x * airSeaLevelExtinction
+                    + opticalDepth.y * aerosolSeaLevelExtinction;
+            }
+
+            float3 CloudLayerEvaluateSunColorAttenuation(
+                float3 positionPS, float3 sunDirection)
+            {
+                float radialDistance = length(positionPS);
+                float cosTheta = dot(positionPS, sunDirection) / radialDistance;
+                radialDistance = max(radialDistance, _CloudLayerPlanetaryRadius);
+                float cosHorizon = CloudLayerComputeCosineOfHorizonAngle(radialDistance);
+
+                if (cosTheta < cosHorizon)
+                    return 0.0;
+
+                float3 attenuation = TransmittanceFromOpticalDepth(
+                    CloudLayerComputeAtmosphericOpticalDepth(radialDistance, cosTheta));
+                float penumbra = saturate((cosTheta - cosHorizon) / 0.0019);
+                return attenuation * penumbra;
+            }
+        #endif
+
+            float2 CloudLayerIntersectSphere(float sphereRadius, float cosChi, float radialDistance)
+            {
+                float radiusRatio = sphereRadius / radialDistance;
+                float discriminant = radiusRatio * radiusRatio
+                    - saturate(1.0 - cosChi * cosChi);
+                return discriminant < 0.0
+                    ? discriminant
+                    : radialDistance * float2(
+                        -cosChi - sqrt(discriminant),
+                        -cosChi + sqrt(discriminant));
+            }
+
+            float2 CloudLayerGetLatLongCoords(float3 direction, bool upperHemisphereOnly)
+            {
+                const float2 inverseAtan = float2(0.1591, 0.3183);
+                float2 uv = float2(
+                    atan2(direction.x, direction.z),
+                    asin(clamp(direction.y, -1.0, 1.0))) * inverseAtan + 0.5;
+                uv.y = upperHemisphereOnly ? uv.y * 2.0 - 1.0 : uv.y;
+                return uv;
+            }
+
+            float3 CloudLayerRotationUp(float3 direction, float2 cosineSine)
+            {
+                float3 axisX = float3(cosineSine.x, 0.0, -cosineSine.y);
+                float3 axisY = float3(cosineSine.y, 0.0, cosineSine.x);
+                return float3(dot(axisX, direction), direction.y, dot(axisY, direction));
+            }
+
+            float3 CloudLayerEvaluateAmbient(float3 normalWS)
+            {
+            #ifdef _CLOUDS_AMBIENT_PROBE
+                float3 result = SAMPLE_TEXTURECUBE_LOD(
+                    _VolumetricCloudsAmbientProbe,
+                    sampler_VolumetricCloudsAmbientProbe,
+                    normalWS,
+                    4.0).rgb;
+            #else
+                float3 result = SHEvalLinearL0L1(
+                    normalWS, _CloudLayerSHAr, _CloudLayerSHAg, _CloudLayerSHAb);
+                result += SHEvalLinearL2(
+                    normalWS,
+                    _CloudLayerSHBr,
+                    _CloudLayerSHBg,
+                    _CloudLayerSHBb,
+                    _CloudLayerSHC);
+            #endif
+
+            #ifdef UNITY_COLORSPACE_GAMMA
+                result = LinearToSRGB(result);
+            #endif
+                return result;
+            }
+
+            float2 CloudLayerSampleMap(float3 direction, int layerIndex)
+            {
+                bool upperHemisphereOnly = _FlowmapParamA.w != 0.0;
+                float2 uv = CloudLayerGetLatLongCoords(direction, upperHemisphereOnly);
+
+            #ifdef _CLOUD_LAYER_DIRECT_MAPS
+                float4 opacityWeights = 0.0;
+                float4 mapValue = 0.0;
+                if (layerIndex == 0)
+                {
+                    opacityWeights = _CloudMapOpacityA;
+                    uv.x -= _CloudMapRotations.x;
+                    mapValue = SAMPLE_TEXTURE2D_LOD(
+                        _CloudMapA, sampler_CloudMapA, uv, 0);
+                }
+                else
+                {
+                    opacityWeights = _CloudMapOpacityB;
+                    uv.x -= _CloudMapRotations.y;
+                    mapValue = SAMPLE_TEXTURE2D_LOD(
+                        _CloudMapB, sampler_CloudMapB, uv, 0);
+                }
+
+                opacityWeights *= rcp(max(dot(opacityWeights, 1.0), 1.0));
+                float opacity = dot(mapValue, opacityWeights);
+                return opacity.xx;
+            #else
+                return SAMPLE_TEXTURE2D_ARRAY_LOD(
+                    _CloudTexture, sampler_CloudTexture, uv, layerIndex, 0).rg;
+            #endif
+            }
+
+            float2 CloudLayerSampleFlowmap(float3 direction, int layerIndex)
+            {
+                bool upperHemisphereOnly = _FlowmapParamA.w != 0.0;
+                float2 uv = CloudLayerGetLatLongCoords(direction, upperHemisphereOnly);
+                if (layerIndex == 0)
+                    return SAMPLE_TEXTURE2D_LOD(_FlowmapA, sampler_FlowmapA, uv, 0).rg;
+                return SAMPLE_TEXTURE2D_LOD(_FlowmapB, sampler_FlowmapB, uv, 0).rg;
+            }
+
+            float4 CloudLayerRenderSingle(
+                float3 direction, int layerIndex, out float distanceToLayer)
+            {
+                float4 flowParameters = layerIndex == 0 ? _FlowmapParamA : _FlowmapParamB;
+                float4 layerParameters = layerIndex == 0
+                    ? _CloudLayerParamsA
+                    : _CloudLayerParamsB;
+                float ambientDimmer = layerIndex == 0 ? _AmbientParams.x : _AmbientParams.y;
+                int distortionMode = layerIndex == 0 ? (int)_LayerModes.x : (int)_LayerModes.y;
+                float altitude = layerParameters.w;
+
+                distanceToLayer = CloudLayerIntersectSphere(
+                    altitude + _CloudLayerPlanetaryRadius,
+                    direction.y,
+                    _CloudLayerPlanetaryRadius).y;
+                float3 position = direction * max(distanceToLayer, 0.0);
+                float2 cloud;
+
+                if (distortionMode != 0)
+                {
+                    float scrollDistance = max(2.0 * altitude, 0.001);
+                    float2 alpha = frac(
+                        flowParameters.z / scrollDistance + float2(0.0, 0.5)) - 0.5;
+                    float3 delta;
+
+                    if (distortionMode == 2)
+                    {
+                        float3 tangent = cross(direction, float3(0.0, 1.0, 0.0));
+                        float tangentLengthSquared = dot(tangent, tangent);
+                        tangent = tangentLengthSquared > 0.000001
+                            ? tangent * rsqrt(tangentLengthSquared)
+                            : float3(1.0, 0.0, 0.0);
+                        float3 bitangent = cross(tangent, direction);
+                        float3 windDirection = CloudLayerRotationUp(direction, flowParameters.xy);
+                        float2 flow = CloudLayerSampleFlowmap(windDirection, layerIndex)
+                            * 2.0 - 1.0;
+                        delta = flow.x * tangent + flow.y * bitangent;
+                    }
+                    else
+                    {
+                        delta = float3(flowParameters.x, 0.0, flowParameters.y);
+                    }
+
+                    float2 cloudA = CloudLayerSampleMap(
+                        normalize(position + alpha.x * delta * scrollDistance), layerIndex);
+                    float2 cloudB = CloudLayerSampleMap(
+                        normalize(position + alpha.y * delta * scrollDistance), layerIndex);
+                    cloud = lerp(cloudA, cloudB, abs(2.0 * alpha.x));
+                }
+                else
+                {
+                    cloud = CloudLayerSampleMap(direction, layerIndex);
+                }
+
+                float3 directLighting = cloud.x * layerParameters.xyz;
+            #ifdef _PHYSICALLY_BASED_SUN
+                float3 positionPS = position
+                    + float3(0.0, _CloudLayerPlanetaryRadius, 0.0);
+                directLighting *= CloudLayerEvaluateSunColorAttenuation(
+                    positionPS, _SunDirection);
+            #endif
+                float3 ambient = max(
+                    CloudLayerEvaluateAmbient(float3(0.0, -1.0, 0.0)), 0.0)
+                    * ambientDimmer;
+                return float4(directLighting + ambient * cloud.y, cloud.y)
+                    * _FlowmapParamB.w;
+            }
+
+            float4 CloudLayerRender(float3 direction, out float effectiveDistance)
+            {
+                float4 clouds = 0.0;
+                float weightedDistance = 0.0;
+                bool upperHemisphereOnly = _FlowmapParamA.w != 0.0;
+
+                if (direction.y >= 0.0 || !upperHemisphereOnly)
+                {
+                    if (_LayerEnabled.x != 0.0)
+                    {
+                        float firstDistance;
+                        clouds = CloudLayerRenderSingle(direction, 0, firstDistance);
+                        weightedDistance = clouds.a * firstDistance;
+                    }
+
+                    if (_LayerEnabled.y != 0.0)
+                    {
+                        float secondDistance;
+                        float4 secondLayer = CloudLayerRenderSingle(
+                            direction, 1, secondDistance);
+                        float secondWeight = (1.0 - clouds.a) * secondLayer.a;
+                        clouds += secondLayer * (1.0 - clouds.a);
+                        weightedDistance += secondWeight * secondDistance;
+                    }
+                }
+
+                effectiveDistance = clouds.a > CLOUD_LAYER_OPACITY_EPSILON
+                    ? weightedDistance * rcp(clouds.a)
+                    : 0.0;
+                return clouds;
+            }
+
+            struct CloudLayerAttributes
+            {
+                uint vertexID : SV_VertexID;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            struct CloudLayerVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 uv : TEXCOORD0;
+                UNITY_VERTEX_OUTPUT_STEREO
+            };
+
+            CloudLayerVaryings VertCloudLayer(CloudLayerAttributes input)
+            {
+                CloudLayerVaryings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+                output.positionCS = GetFullScreenTriangleVertexPosition(
+                    input.vertexID, UNITY_RAW_FAR_CLIP_VALUE);
+                output.uv = GetFullScreenTriangleTexCoord(input.vertexID);
+                return output;
+            }
+
+            float4 FragCloudLayer(CloudLayerVaryings input) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                float2 uv = UnityStereoTransformScreenSpaceTex(input.uv);
+                float rawDepth = SampleSceneDepth(uv);
+                clip(Linear01Depth(rawDepth, _ZBufferParams) - 0.9999);
+
+            #if defined(UNITY_SINGLE_PASS_STEREO)
+                float3 positionWS = ComputeWorldSpacePosition(
+                    uv, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP);
+                float3 directionWS = normalize(positionWS - _WorldSpaceCameraPos);
+            #else
+                float3 bottomRay = lerp(
+                    _CloudLayerViewRayBottomLeft, _CloudLayerViewRayBottomRight, uv.x);
+                float3 topRay = lerp(
+                    _CloudLayerViewRayTopLeft, _CloudLayerViewRayTopRight, uv.x);
+                float3 directionWS = normalize(lerp(bottomRay, topRay, uv.y));
+            #endif
+
+                float effectiveDistance;
+                float4 cloud = CloudLayerRender(directionWS, effectiveDistance);
+                if (cloud.a > CLOUD_LAYER_OPACITY_EPSILON)
+                {
+                    PositionInputs positionInput;
+                    ZERO_INITIALIZE(PositionInputs, positionInput);
+                    positionInput.positionWS = GetCameraPositionWS() + directionWS * effectiveDistance;
+                    positionInput.positionNDC = uv;
+                    positionInput.positionSS = uint2(input.positionCS.xy);
+                    // Cloud layers have an explicit distance even though they are rasterized at
+                    // far depth. Mark this as geometry so fog and aerial perspective use it.
+                    positionInput.deviceDepth = 0.5;
+                    positionInput.linearDepth = effectiveDistance
+                        * max(dot(directionWS, GetViewForwardDir()), FLT_EPS);
+
+                    half3 atmosphereColor;
+                    half3 atmosphereOpacity;
+                    EvaluateAtmosphericScattering(
+                        positionInput,
+                        -directionWS,
+                        atmosphereColor,
+                        atmosphereOpacity);
+                    half3 atmosphereTransmittance = 1.0 - atmosphereOpacity;
+                    cloud.rgb = atmosphereColor * cloud.a
+                        + atmosphereTransmittance * cloud.rgb;
+                }
+
+                return cloud;
+            }
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "Opaque Atmospheric Scattering MSAA"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            Blend One SrcAlpha
+            ZTest Always
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile_local_fragment PBSKY_MSAA_2 PBSKY_MSAA_4 PBSKY_MSAA_8
+            #pragma multi_compile_local_fragment _ LOCAL_SKY
+            #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
+            #pragma multi_compile_fragment _ PHYSICALLY_BASED_SKY
+            #pragma multi_compile_fragment _ DEBUG_DISPLAY
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #define OPAQUE_FOG_PASS
+            #include "./AtmosphericScattering.hlsl"
+
+            #if defined(PBSKY_MSAA_8)
+                #define PBSKY_SAMPLE_COUNT 8
+            #elif defined(PBSKY_MSAA_4)
+                #define PBSKY_SAMPLE_COUNT 4
+            #else
+                #define PBSKY_SAMPLE_COUNT 2
+            #endif
+
+            #if defined(UNITY_STEREO_INSTANCING_ENABLED) || defined(UNITY_STEREO_MULTIVIEW_ENABLED)
+                Texture2DMSArray<float, PBSKY_SAMPLE_COUNT> _PBSkyDepthMSAA;
+            #else
+                Texture2DMS<float, PBSKY_SAMPLE_COUNT> _PBSkyDepthMSAA;
+            #endif
+
+            float4 _ScreenResolution;
+
+            struct ScatteringVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                UNITY_VERTEX_OUTPUT_STEREO
+            };
+
+            ScatteringVaryings vert(Attributes input)
+            {
+                ScatteringVaryings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+                output.positionCS = GetFullScreenTriangleVertexPosition(input.vertexID);
+                return output;
+            }
+
+            // Sample-frequency shading preserves the opaque/sky coverage that is lost
+            // by the farthest-depth resolve used for _CameraDepthTexture.
+            half4 frag(ScatteringVaryings input, uint sampleIndex : SV_SampleIndex) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                int2 pixelCoords = int2(input.positionCS.xy);
+            #if defined(UNITY_STEREO_INSTANCING_ENABLED) || defined(UNITY_STEREO_MULTIVIEW_ENABLED)
+                float depth = LOAD_TEXTURE2D_ARRAY_MSAA(_PBSkyDepthMSAA, pixelCoords, unity_StereoEyeIndex, sampleIndex);
+            #else
+                float depth = LOAD_TEXTURE2D_MSAA(_PBSkyDepthMSAA, pixelCoords, sampleIndex);
+            #endif
+                PositionInputs posInput = GetPositionInput(input.positionCS.xy, _ScreenResolution.zw, depth, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+                float3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
+
+                half3 color, opacity;
+                EvaluateGeometryAtmosphericScattering(posInput, V, color, opacity);
+                return half4(color, 1.0h - Min3(opacity.x, opacity.y, opacity.z));
             }
             ENDHLSL
         }
