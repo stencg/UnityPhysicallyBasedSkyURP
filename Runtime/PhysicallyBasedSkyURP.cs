@@ -41,8 +41,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     [Header("Performance")]
     [Tooltip("The precomputation quality of physically based sky.")]
     [SerializeField] private PrecomputationQualityMode m_Precomputation = PrecomputationQualityMode.High;
-    [Tooltip("Smooths fog and atmospheric scattering where opaque geometry meets the sky. Reduces aliased lines at distant geometry silhouettes. Requires a camera depth texture.")]
-    [SerializeField] private bool m_FogDepthEdgeAntialiasing = false;
 
     private bool isShaderMismatchLogPrinted;
     private int lastSkyType = int.MinValue;
@@ -72,7 +70,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     private const string k_PbrSkyMaterialName = "Physically Based Sky";
     private const string k_DynamicAmbientProbeKeywordName = "VISUAL_ENVIRONMENT_DYNAMIC_SKY";
     private const string k_AtmosphericScatteringLowResolutionKeywordName = "ATMOSPHERIC_SCATTERING_LOW_RES";
-    private const string k_FogDepthEdgeAntialiasingKeywordName = "_FOG_DEPTH_EDGE_ANTIALIASING";
 
     /// <summary>
     /// Get the skybox material of physically based sky.
@@ -143,15 +140,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     {
         get { return m_Precomputation; }
         set { m_Precomputation = value; }
-    }
-
-    /// <summary>
-    /// Gets or sets a value indicating whether fog is anti-aliased at opaque/sky depth edges.
-    /// </summary>
-    public bool FogDepthEdgeAntialiasing
-    {
-        get { return m_FogDepthEdgeAntialiasing; }
-        set { m_FogDepthEdgeAntialiasing = value; }
     }
 
     /// <summary>
@@ -336,7 +324,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             m_PBSkyPrePass.pbrSky = pbrSkyVolume;
             m_SkyViewLUTPass.pbrSky = pbrSkyVolume;
             m_AtmosphericScatteringPass.pbrSky = pbrSkyVolume;
-            m_AtmosphericScatteringPass.fogDepthEdgeAntialiasing = m_FogDepthEdgeAntialiasing;
 
             m_PBSkyPrePass.visualEnvironment = visualEnvVolume;
             m_SkyViewLUTPass.visualEnvironment = visualEnvVolume;
@@ -2355,7 +2342,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         public PhysicallyBasedSky pbrSky;
         public VisualEnvironment visualEnvironment;
         public Fog fog;
-        public bool fogDepthEdgeAntialiasing;
 
         public Material lutMaterial;
         public StaticFogSkyCache staticFogSkyCache;
@@ -2390,13 +2376,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         // "_ScreenSize" that supports dynamic resolution
         private static readonly int _ScreenResolution = Shader.PropertyToID("_ScreenResolution");
 
-        private readonly LocalKeyword m_FogDepthEdgeAntialiasingKeyword;
 
         public AtmosphericScatteringPass(Material lutMaterial, StaticFogSkyCache staticFogSkyCache)
         {
             this.lutMaterial = lutMaterial;
             this.staticFogSkyCache = staticFogSkyCache;
-            m_FogDepthEdgeAntialiasingKeyword = new LocalKeyword(lutMaterial.shader, k_FogDepthEdgeAntialiasingKeywordName);
         }
 
         #region Non Render Graph Pass
@@ -2421,7 +2405,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 SetFogProperties(cmd, GetFogProperties(renderingData.cameraData.camera, staticFogSky));
             }
 
-            cmd.SetKeyword(lutMaterial, m_FogDepthEdgeAntialiasingKeyword, fogDepthEdgeAntialiasing);
         }
 
     #if UNITY_6000_0_OR_NEWER
@@ -2461,13 +2444,16 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal Material lutMaterial;
 
             internal TextureHandle cameraColorHandle;
+            internal TextureHandle cameraDepthMsaa;
+            internal int msaaSamples;
             internal bool enableFog;
-            internal bool fogDepthEdgeAntialiasing;
-            internal LocalKeyword fogDepthEdgeAntialiasingKeyword;
             internal FogProperties fogProperties;
             internal Vector2Int screenResolution;
             internal TextureHandle staticFogSkyTexture;
         }
+
+        private static readonly int _PBSkyDepthMSAA = Shader.PropertyToID("_PBSkyDepthMSAA");
+        private const int k_MsaaScatteringPass = 9;
 
         // This static method is used to execute the pass and passed as the RenderFunc delegate to the RenderGraph render pass
         static void ExecutePass(PassData data, UnsafeGraphContext context)
@@ -2477,7 +2463,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             SetScreenResolution(cmd, data.screenResolution.x, data.screenResolution.y);
 
             cmd.SetGlobalInteger(_FogEnabled, data.enableFog ? 1 : 0);
-            cmd.SetKeyword(data.lutMaterial, data.fogDepthEdgeAntialiasingKeyword, data.fogDepthEdgeAntialiasing);
 
             if (data.enableFog)
             {
@@ -2487,7 +2472,24 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 SetFogProperties(cmd, data.fogProperties);
             }
 
-            Blitter.BlitCameraTexture(cmd, data.cameraColorHandle, data.cameraColorHandle, RenderBufferLoadAction.Load, RenderBufferStoreAction.Store, data.lutMaterial, pass: 4);
+            if (data.cameraDepthMsaa.IsValid())
+            {
+                cmd.SetKeyword(data.lutMaterial, new LocalKeyword(data.lutMaterial.shader, "PBSKY_MSAA_2"), data.msaaSamples == 2);
+                cmd.SetKeyword(data.lutMaterial, new LocalKeyword(data.lutMaterial.shader, "PBSKY_MSAA_4"), data.msaaSamples == 4);
+                cmd.SetKeyword(data.lutMaterial, new LocalKeyword(data.lutMaterial.shader, "PBSKY_MSAA_8"), data.msaaSamples == 8);
+                cmd.SetGlobalTexture(_PBSkyDepthMSAA, data.cameraDepthMsaa);
+
+                // Load and retain the individual color samples. No camera-color sampling
+                // or resolve: SV_SampleIndex pairs each color sample with its own depth.
+                RTHandle colorTarget = data.cameraColorHandle;
+                CalculateActualScreenResolution(cmd, colorTarget);
+                CoreUtils.SetRenderTarget(cmd, colorTarget, RenderBufferLoadAction.Load, RenderBufferStoreAction.Store, ClearFlag.None, Color.clear);
+                Blitter.BlitTexture(cmd, new Vector4(1, 1, 0, 0), data.lutMaterial, k_MsaaScatteringPass);
+            }
+            else
+            {
+                Blitter.BlitCameraTexture(cmd, data.cameraColorHandle, data.cameraColorHandle, RenderBufferLoadAction.Load, RenderBufferStoreAction.Store, data.lutMaterial, pass: 4);
+            }
         }
 
         // This is where the renderGraph handle can be accessed.
@@ -2508,6 +2510,29 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             PBSkyFrameResources frameResources = frameData.GetOrCreate<PBSkyFrameResources>();
             frameResources.fogSky = staticFogSkyTexture;
 
+            TextureHandle depthMsaa = default;
+            int msaaSamples = 1;
+            if (resourceData.activeDepthTexture.IsValid() && !resourceData.isActiveTargetBackBuffer &&
+                SystemInfo.graphicsShaderLevel >= 45 && SystemInfo.supportsMultisampledTextures != 0)
+            {
+                TextureDesc colorDesc = renderGraph.GetTextureDesc(resourceData.activeColorTexture);
+                TextureDesc depthDesc = renderGraph.GetTextureDesc(resourceData.activeDepthTexture);
+                int samples = (int)colorDesc.msaaSamples;
+                if ((samples == 2 || samples == 4 || samples == 8) &&
+                    depthDesc.msaaSamples == colorDesc.msaaSamples && depthDesc.bindTextureMS &&
+                    depthDesc.memoryless == RenderTextureMemoryless.None && colorDesc.memoryless == RenderTextureMemoryless.None &&
+                    depthDesc.sizeMode == colorDesc.sizeMode &&
+                    (depthDesc.sizeMode != TextureSizeMode.Scale || depthDesc.scale == colorDesc.scale) &&
+                    (depthDesc.sizeMode != TextureSizeMode.Functor || depthDesc.func == colorDesc.func) &&
+                    depthDesc.width == colorDesc.width && depthDesc.height == colorDesc.height &&
+                    depthDesc.dimension == colorDesc.dimension && depthDesc.slices == colorDesc.slices &&
+                    lutMaterial.FindPass("Opaque Atmospheric Scattering MSAA") == k_MsaaScatteringPass)
+                {
+                    depthMsaa = resourceData.activeDepthTexture;
+                    msaaSamples = samples;
+                }
+            }
+
             // add an unsafe render pass to the render graph, specifying the name and the data type that will be passed to the ExecutePass function
             using (var builder = renderGraph.AddUnsafePass<PassData>(profilerTag, out var passData))
             {
@@ -2515,15 +2540,17 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 // The active color and depth textures are the main color and depth buffers that the camera renders into
                 passData.lutMaterial = lutMaterial;
                 passData.cameraColorHandle = resourceData.activeColorTexture;
+                passData.cameraDepthMsaa = depthMsaa;
+                passData.msaaSamples = msaaSamples;
                 passData.enableFog = isFogEnabled;
-                passData.fogDepthEdgeAntialiasing = fogDepthEdgeAntialiasing;
-                passData.fogDepthEdgeAntialiasingKeyword = m_FogDepthEdgeAntialiasingKeyword;
                 passData.fogProperties = isFogEnabled ? GetFogProperties(cameraData.camera, staticFogSky) : default;
                 passData.screenResolution = new Vector2Int(cameraData.cameraTargetDescriptor.width, cameraData.cameraTargetDescriptor.height);
                 passData.staticFogSkyTexture = staticFogSkyTexture;
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
+                if (depthMsaa.IsValid())
+                    builder.UseTexture(depthMsaa, AccessFlags.Read);
                 if (staticFogSkyTexture.IsValid())
                     builder.UseTexture(staticFogSkyTexture, AccessFlags.Read);
                 builder.UseAllGlobalTextures(true);

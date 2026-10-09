@@ -19,6 +19,7 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
         // Pass 6: Static Fog Environment Snapshot
         // Pass 7: Volumetric Clouds Combine
         // Pass 8: Cloud Layer Combine
+        // Pass 9: Opaque Atmospheric Scattering MSAA (Render Graph)
 
         Pass
         {
@@ -601,7 +602,6 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
 
             #pragma multi_compile_local_fragment _ LOCAL_SKY
             #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
-            #pragma multi_compile_local_fragment _ _FOG_DEPTH_EDGE_ANTIALIASING
 
             #pragma multi_compile_fragment _ PHYSICALLY_BASED_SKY
             #pragma multi_compile_fragment _ DEBUG_DISPLAY
@@ -644,32 +644,6 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 half3 volColor, volOpacity = 0.0;
                 EvaluateAtmosphericScattering(posInput, V, volColor, volOpacity);
 
-            #if defined(_FOG_DEPTH_EDGE_ANTIALIASING)
-                if (abs(depth - UNITY_RAW_FAR_CLIP_VALUE) > 1e-6)
-                {
-                    int2 screenSize = int2(_ScreenResolution.xy);
-                    int2 offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
-                    int skyNeighborCount = 0;
-                    for (int i = 0; i < 4; i++)
-                    {
-                        int2 neighborCoords = clamp(pixelCoords + offsets[i], int2(0, 0), screenSize - 1);
-                        float neighborDepth = LOAD_TEXTURE2D_X_LOD(_CameraDepthTexture, neighborCoords, 0).r;
-                        if (abs(neighborDepth - UNITY_RAW_FAR_CLIP_VALUE) <= 1e-6)
-                            skyNeighborCount++;
-                    }
-
-                    if (skyNeighborCount > 0)
-                    {
-                        PositionInputs skyPosInput = GetPositionInput(input.positionCS.xy, _ScreenResolution.zw, UNITY_RAW_FAR_CLIP_VALUE, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
-                        half3 skyFogColor, skyFogOpacity = 0.0;
-                        EvaluateAtmosphericScattering(skyPosInput, V, skyFogColor, skyFogOpacity);
-
-                        half skyCoverage = skyNeighborCount * 0.2h;
-                        volColor = lerp(volColor, skyFogColor, skyCoverage);
-                        volOpacity = lerp(volOpacity, skyFogOpacity, skyCoverage);
-                    }
-                }
-            #endif
 
                 // We use hardware blend options for better performance
                 half atmosphericOpacity = 1.0 - Min3(volOpacity.x, volOpacity.y, volOpacity.z);
@@ -1499,6 +1473,81 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
                 }
 
                 return cloud;
+            }
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "Opaque Atmospheric Scattering MSAA"
+            Tags { "PreviewType" = "None" "LightMode" = "Physically Based Sky" }
+
+            Blend One SrcAlpha
+            ZTest Always
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile_local_fragment PBSKY_MSAA_2 PBSKY_MSAA_4 PBSKY_MSAA_8
+            #pragma multi_compile_local_fragment _ LOCAL_SKY
+            #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
+            #pragma multi_compile_fragment _ PHYSICALLY_BASED_SKY
+            #pragma multi_compile_fragment _ DEBUG_DISPLAY
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #define OPAQUE_FOG_PASS
+            #include "./AtmosphericScattering.hlsl"
+
+            #if defined(PBSKY_MSAA_8)
+                #define PBSKY_SAMPLE_COUNT 8
+            #elif defined(PBSKY_MSAA_4)
+                #define PBSKY_SAMPLE_COUNT 4
+            #else
+                #define PBSKY_SAMPLE_COUNT 2
+            #endif
+
+            #if defined(UNITY_STEREO_INSTANCING_ENABLED) || defined(UNITY_STEREO_MULTIVIEW_ENABLED)
+                Texture2DMSArray<float, PBSKY_SAMPLE_COUNT> _PBSkyDepthMSAA;
+            #else
+                Texture2DMS<float, PBSKY_SAMPLE_COUNT> _PBSkyDepthMSAA;
+            #endif
+
+            float4 _ScreenResolution;
+
+            struct ScatteringVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                UNITY_VERTEX_OUTPUT_STEREO
+            };
+
+            ScatteringVaryings vert(Attributes input)
+            {
+                ScatteringVaryings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+                output.positionCS = GetFullScreenTriangleVertexPosition(input.vertexID);
+                return output;
+            }
+
+            // Sample-frequency shading preserves the opaque/sky coverage that is lost
+            // by the farthest-depth resolve used for _CameraDepthTexture.
+            half4 frag(ScatteringVaryings input, uint sampleIndex : SV_SampleIndex) : SV_Target
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+                int2 pixelCoords = int2(input.positionCS.xy);
+            #if defined(UNITY_STEREO_INSTANCING_ENABLED) || defined(UNITY_STEREO_MULTIVIEW_ENABLED)
+                float depth = LOAD_TEXTURE2D_ARRAY_MSAA(_PBSkyDepthMSAA, pixelCoords, unity_StereoEyeIndex, sampleIndex);
+            #else
+                float depth = LOAD_TEXTURE2D_MSAA(_PBSkyDepthMSAA, pixelCoords, sampleIndex);
+            #endif
+                PositionInputs posInput = GetPositionInput(input.positionCS.xy, _ScreenResolution.zw, depth, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+                float3 V = normalize(GetCameraPositionWS() - posInput.positionWS);
+
+                half3 color, opacity;
+                EvaluateAtmosphericScattering(posInput, V, color, opacity);
+                return half4(color, 1.0h - Min3(opacity.x, opacity.y, opacity.z));
             }
             ENDHLSL
         }
