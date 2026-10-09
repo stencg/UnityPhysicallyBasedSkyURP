@@ -41,7 +41,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     [Header("Performance")]
     [Tooltip("The precomputation quality of physically based sky.")]
     [SerializeField] private PrecomputationQualityMode m_Precomputation = PrecomputationQualityMode.High;
-    [Tooltip("Smooths fog only where opaque geometry meets the sky. Reduces aliased fog lines at distant geometry silhouettes. Active Fog requires a camera depth texture.")]
+    [Tooltip("Smooths fog and atmospheric scattering where opaque geometry meets the sky. Reduces aliased lines at distant geometry silhouettes. Requires a camera depth texture.")]
     [SerializeField] private bool m_FogDepthEdgeAntialiasing = false;
 
     private bool isShaderMismatchLogPrinted;
@@ -2421,7 +2421,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 SetFogProperties(cmd, GetFogProperties(renderingData.cameraData.camera, staticFogSky));
             }
 
-            cmd.SetKeyword(lutMaterial, m_FogDepthEdgeAntialiasingKeyword, isFogEnabled && fogDepthEdgeAntialiasing);
+            cmd.SetKeyword(lutMaterial, m_FogDepthEdgeAntialiasingKeyword, fogDepthEdgeAntialiasing);
         }
 
     #if UNITY_6000_0_OR_NEWER
@@ -2477,7 +2477,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             SetScreenResolution(cmd, data.screenResolution.x, data.screenResolution.y);
 
             cmd.SetGlobalInteger(_FogEnabled, data.enableFog ? 1 : 0);
-            cmd.SetKeyword(data.lutMaterial, data.fogDepthEdgeAntialiasingKeyword, data.enableFog && data.fogDepthEdgeAntialiasing);
+            cmd.SetKeyword(data.lutMaterial, data.fogDepthEdgeAntialiasingKeyword, data.fogDepthEdgeAntialiasing);
 
             if (data.enableFog)
             {
