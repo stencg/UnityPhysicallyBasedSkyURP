@@ -310,11 +310,10 @@ void EvaluateAtmosphericScattering(half3 V, float2 positionNDC, float tFrag, out
 #if SHADEROPTIONS_PRECOMPUTED_ATMOSPHERIC_ATTENUATION
     EvaluateCameraAtmosphericScattering(V, positionNDC, tFrag, skyColor, skyOpacity);
 #else
-    #ifdef LOCAL_SKY
+    // Atmospheric LUTs only cover positions above the planet surface. The per-camera
+    // position applies the same 1 m altitude clamp as the sky, including cloud passes
+    // that do not compile LOCAL_SKY. Keep the real camera position for depth and fog.
     float3 O = _PBRSkyCameraPosPS;
-    #else
-    float3 O = GetCameraPositionWS() - _PlanetCenterPosition;
-    #endif
     EvaluatePbrAtmosphere(O, -V, tFrag, false, skyColor, skyOpacity);
     skyColor *= _IntensityMultiplier;
 #endif

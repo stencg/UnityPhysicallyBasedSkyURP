@@ -182,7 +182,9 @@ float MapQuadraticHeight(float height)
 {
     // TODO: we should adjust sub-texel coordinates
     // to account for the non-linear height distribution.
-    return sqrt(height * _RcpAtmosphericDepth);
+    // LUTs contain no below-ground samples. Guard endpoint heights and roundoff at
+    // the surface before sqrt: a clamp sampler cannot repair NaN coordinates.
+    return sqrt(max(height, 0.0) * _RcpAtmosphericDepth);
 }
 
 // Returns the height.
