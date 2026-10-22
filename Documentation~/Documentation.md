@@ -4,6 +4,16 @@ This page will be available soon.
 
 You may also refer to [HDRP's Physically Based Sky documentation](https://docs.unity3d.com/Packages/com.unity.render-pipelines.high-definition@17.0/manual/create-a-physically-based-sky.html).
 
+## Sun Source and realtime lighting
+
+In RenderGraph, an assigned Sun Source can illuminate PBSky and its ambient environment even when
+its Light component or GameObject is inactive, or the light is baked-only. This does not enable
+realtime surface lighting from that source.
+
+PBSky applies atmospheric attenuation to URP's selected active realtime main light independently,
+preserving its mixed-lighting state. With no eligible realtime main light, PBSky leaves URP's
+main-light color unchanged. Rendering layers are not required to suppress an inactive sun's highlights.
+
 ## Atmospheric haze on geometry
 
 Atmospheric Scattering evaluates opaque geometry and compatible transparent shaders from the same

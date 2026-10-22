@@ -1252,9 +1252,33 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             return RenderSettings.sun;
         }
 
+        private bool TryGetRealtimeMainLightColor(UniversalLightData lightData, Camera camera, out Vector4 color)
+        {
+            color = Vector4.zero;
+            int mainLightIndex = lightData.mainLightIndex;
+            if (mainLightIndex < 0 || mainLightIndex >= lightData.visibleLights.Length)
+                return false;
+
+            VisibleLight visibleLight = lightData.visibleLights[mainLightIndex];
+            Light light = visibleLight.light;
+            if (visibleLight.lightType != LightType.Directional || light == null || !light.isActiveAndEnabled || light.lightmapBakeType == LightmapBakeType.Baked)
+                return false;
+
+            // Attenuate the light URP actually selected, independently of the sky's Sun Source.
+            float3 positionPS = float3(camera.transform.position) - visualEnvironment.GetPlanetCenterRadius(camera.transform.position).xyz;
+            float3 lightDirection = -((Vector3)visibleLight.localToWorldMatrix.GetColumn(2));
+            float3 attenuation = EvaluateSunColorAttenuation(positionPS, lightDirection);
+            Color finalColor = visibleLight.finalColor;
+            LightBakingOutput bakingOutput = light.bakingOutput;
+            bool isSubtractive = bakingOutput.isBaked && bakingOutput.lightmapBakeType == LightmapBakeType.Mixed && bakingOutput.mixedLightingMode == MixedLightingMode.Subtractive;
+            color = new Vector4(finalColor.r * attenuation.x, finalColor.g * attenuation.y, finalColor.b * attenuation.z, isSubtractive ? 0.0f : 1.0f);
+            return true;
+        }
+
         private class PassData
         {
-            internal Vector3 mainLightColor;
+            internal bool overrideMainLightColor;
+            internal Vector4 mainLightColor;
             internal bool enableAtmosphericScattering;
             internal bool isReflectionCamera;
             internal CameraAtmosphereData cameraAtmosphereData;
@@ -1266,7 +1290,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
             cmd.SetGlobalFloat(_DisableSunDisk, data.isReflectionCamera ? 1.0f : 0.0f);
-            cmd.SetGlobalVector(_MainLightColor, data.mainLightColor);
+            if (data.overrideMainLightColor)
+                cmd.SetGlobalVector(_MainLightColor, data.mainLightColor);
             cmd.EnableShaderKeyword(PHYSICALLY_BASED_SKY);
             cmd.EnableShaderKeyword(SKY_NOT_BAKING);
             cmd.SetGlobalInt(GeometryAtmospherePass.AvailableId, 0);
@@ -1309,7 +1334,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
                 UpdateAmbientProbe(mainLight, camera, mainLightColor);
 
-                passData.mainLightColor = mainLightColor;
+                passData.overrideMainLightColor = TryGetRealtimeMainLightColor(lightData, camera, out passData.mainLightColor);
                 passData.enableAtmosphericScattering = pbrSky.atmosphericScattering.value;
                 passData.isReflectionCamera = cameraData.camera.cameraType == CameraType.Reflection;
                 passData.cameraAtmosphereData = GetCameraAtmosphereData(camera);
