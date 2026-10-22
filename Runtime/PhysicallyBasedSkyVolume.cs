@@ -1276,7 +1276,7 @@ public class PhysicallyBasedSky : VolumeComponent, IPostProcessComponent
                 //CelestialBodyData light = GetCelestialBody();
                 //float3 L          = -light.forward.xyz;
 
-                float3 sunTransmittance = EvaluateSunColorAttenuation(dot(N, L), r);
+                float3 sunTransmittance = EvaluateSunColorAttenuation(P, L);
                 float3 phaseScatter = AirScatter(height) * AirPhase(-dot(L, V)) + AerosolScatter(height) * AerosolPhase(-dot(L, V));
                 //float3 multiScatteredLuminance = EvaluateMultipleScattering(dot(N, L), height);
 
