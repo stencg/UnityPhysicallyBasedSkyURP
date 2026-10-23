@@ -1261,7 +1261,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             VisibleLight visibleLight = lightData.visibleLights[mainLightIndex];
             Light light = visibleLight.light;
-            if (visibleLight.lightType != LightType.Directional || light == null || !light.isActiveAndEnabled || light.lightmapBakeType == LightmapBakeType.Baked)
+            if (visibleLight.lightType != LightType.Directional || light == null || !light.isActiveAndEnabled)
+                return false;
+
+            LightBakingOutput bakingOutput = light.bakingOutput;
+            if (bakingOutput.lightmapBakeType == LightmapBakeType.Baked)
                 return false;
 
             // Attenuate the light URP actually selected, independently of the sky's Sun Source.
@@ -1269,7 +1273,6 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             float3 lightDirection = -((Vector3)visibleLight.localToWorldMatrix.GetColumn(2));
             float3 attenuation = EvaluateSunColorAttenuation(positionPS, lightDirection);
             Color finalColor = visibleLight.finalColor;
-            LightBakingOutput bakingOutput = light.bakingOutput;
             bool isSubtractive = bakingOutput.isBaked && bakingOutput.lightmapBakeType == LightmapBakeType.Mixed && bakingOutput.mixedLightingMode == MixedLightingMode.Subtractive;
             color = new Vector4(finalColor.r * attenuation.x, finalColor.g * attenuation.y, finalColor.b * attenuation.z, isSubtractive ? 0.0f : 1.0f);
             return true;
