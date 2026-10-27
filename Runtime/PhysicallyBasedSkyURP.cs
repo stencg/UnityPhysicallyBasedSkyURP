@@ -198,13 +198,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
     public override void Create()
     {
-        var stack = VolumeManager.instance.stack;
-        PhysicallyBasedSky pbrSkyVolume = stack.GetComponent<PhysicallyBasedSky>();
-        VisualEnvironment visualEnvVolume = stack.GetComponent<VisualEnvironment>();
-
         // Validate sky shaders
         bool shadersValid = true;
-        if (m_Shader != Shader.Find(k_PbrSkyShaderName))
+        if (m_Shader == null || m_Shader != Shader.Find(k_PbrSkyShaderName))
         {
     #if UNITY_EDITOR || DEBUG
             if (!isShaderMismatchLogPrinted)
@@ -216,7 +212,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             shadersValid = false;
         }
 
-        if (m_LutShader != Shader.Find(k_PbrSkyLutShaderName))
+        if (m_LutShader == null || m_LutShader != Shader.Find(k_PbrSkyLutShaderName))
         {
     #if UNITY_EDITOR || DEBUG
             if (!isShaderMismatchLogPrinted)
@@ -234,13 +230,23 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         // Cleanup settings when disabled
         if (!isActive)
         {
+            Shader.DisableKeyword(k_DynamicAmbientProbeKeywordName);
+
+            // Create can run without a loaded scene or an initialized volume stack.
+            var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            if (!scene.IsValid() || !scene.isLoaded)
+                return;
+
+            var stack = VolumeManager.instance.stack;
+            if (stack == null)
+                return;
+
+            VisualEnvironment visualEnvVolume = stack.GetComponent<VisualEnvironment>();
             bool isCustomSkyType = visualEnvVolume != null && visualEnvVolume.IsActive() && visualEnvVolume.skyType.value == (int)VisualEnvironment.SkyType.Custom && visualEnvVolume.customSkyMaterial.value != null;
 
             SetSkybox(isCustomSkyType ? visualEnvVolume.customSkyMaterial.value : m_FallbackSkyMaterial, false);
             RenderSettings.defaultReflectionMode = DefaultReflectionMode.Skybox;
             RenderSettings.customReflectionTexture = null;
-
-            Shader.DisableKeyword(k_DynamicAmbientProbeKeywordName);
 
         #if UNITY_EDITOR
             // Update ambient probe
@@ -253,6 +259,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         }
 
         // Initialize sky materials
+        // Inspector validation can call Create repeatedly without disposing the feature.
+        CoreUtils.Destroy(m_PbrSkyMaterial);
+        CoreUtils.Destroy(m_PbrSkyLUTMaterial);
         m_PbrSkyMaterial = CoreUtils.CreateEngineMaterial(m_Shader);
         m_PbrSkyLUTMaterial = CoreUtils.CreateEngineMaterial(m_LutShader);
         m_PbrSkyMaterial.name = k_PbrSkyMaterialName;
@@ -309,15 +318,22 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         shouldDisable |= renderingData.cameraData.camera == null;
 
-        shouldDisable |= renderingData.cameraData.camera.cameraType == CameraType.Preview;
+        shouldDisable |= renderingData.cameraData.camera != null && renderingData.cameraData.camera.cameraType == CameraType.Preview;
 
         if (shouldDisable)
             return;
 
         var stack = VolumeManager.instance.stack;
+        if (stack == null)
+            return;
+
         PhysicallyBasedSky pbrSkyVolume = stack.GetComponent<PhysicallyBasedSky>();
         VisualEnvironment visualEnvVolume = stack.GetComponent<VisualEnvironment>();
         Fog fogVolume = stack.GetComponent<Fog>();
+
+        // The component can be unavailable while the editor rebuilds the volume stack.
+        if (visualEnvVolume == null)
+            return;
 
         m_StaticFogSkyCache.dynamicEnvironmentTexture = m_AmbientProbePass.environmentTexture;
 
