@@ -2897,6 +2897,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         private static readonly int glossyEnvironmentCubeMap = Shader.PropertyToID(_GlossyEnvironmentCubeMap);
         private static readonly int skyTexture = Shader.PropertyToID(_SkyTexture);
+        private static readonly int cloudSunDirection = Shader.PropertyToID("_VolumetricCloudsSunDirection");
+        private static readonly int cloudSunColor = Shader.PropertyToID("_VolumetricCloudsSunColor");
+        private static readonly int cloudPhysicalSunColor = Shader.PropertyToID("_SunColor");
 
         private static readonly int worldSpaceCameraPos = Shader.PropertyToID("_WorldSpaceCameraPos");
         private static readonly int disableSunDisk = Shader.PropertyToID("_DisableSunDisk");
@@ -3107,6 +3110,10 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private class PassData
         {
             internal Material cloudsMaterial;
+            internal bool bindCloudSun;
+            internal Vector4 cloudSunDirection;
+            internal Vector4 cloudSunColor;
+            internal Vector4 cloudPhysicalSunColor;
 
             internal TextureHandle probeColorHandle;
             internal TextureHandle skyColorHandle;
@@ -3128,6 +3135,49 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal int volumetricCloudsEnvironmentPass;
 
             internal int skyTextureMipCounts;
+        }
+
+        private static void PrepareCloudSun(PassData data, UniversalLightData lightData)
+        {
+            data.bindCloudSun = data.hasVolumetricClouds && data.cloudsMaterial != null &&
+                data.cloudsMaterial.HasProperty(cloudSunDirection) && data.cloudsMaterial.HasProperty(cloudSunColor);
+            if (!data.bindCloudSun)
+                return;
+            // Cloud lighting may use a baked sky sun independently of URP's realtime light.
+            Light sun = RenderSettings.sun;
+            if (lightData.mainLightIndex >= 0)
+            {
+                VisibleLight visible = lightData.visibleLights[lightData.mainLightIndex];
+                Light selected = visible.light;
+                if (selected != null && visible.lightType == LightType.Directional &&
+                    (selected.shadows != LightShadows.None || sun != null && !sun.isActiveAndEnabled))
+                    sun = selected;
+            }
+            Color color = Color.black;
+            data.cloudSunDirection = Vector4.zero;
+            if (sun != null)
+            {
+                Vector4 direction = -sun.transform.localToWorldMatrix.GetColumn(2);
+                data.cloudSunDirection = new Vector4(direction.x, direction.y, direction.z, 0.0f);
+                color = (QualitySettings.activeColorSpace == ColorSpace.Linear ? sun.color.linear : sun.color.gamma) *
+                    (sun.useColorTemperature ? Mathf.CorrelatedColorTemperatureToRGB(sun.colorTemperature) : Color.white) * sun.intensity;
+            }
+            data.cloudSunColor = color;
+#if URP_PHYSICAL_LIGHT
+            bool physical = sun != null && sun.GetComponent<AdditionalLightData>() != null;
+            data.cloudPhysicalSunColor = physical ? (Vector4)color : (Vector4)(color * PI);
+#else
+            data.cloudPhysicalSunColor = color * PI;
+#endif
+        }
+
+        private static void BindCloudSun(PassData data)
+        {
+            if (!data.bindCloudSun)
+                return;
+            data.cloudsMaterial.SetVector(cloudSunDirection, data.cloudSunDirection);
+            data.cloudsMaterial.SetVector(cloudSunColor, data.cloudSunColor);
+            data.cloudsMaterial.SetVector(cloudPhysicalSunColor, data.cloudPhysicalSunColor);
         }
 
         // This static method is used to execute the pass and passed as the RenderFunc delegate to the RenderGraph render pass
@@ -3174,6 +3224,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             {
                 // We split the rendering into 2 loops to avoid calling CopyTexture() multiple times, which can be slow on the GPU side.
                 cmd.CopyTexture(data.skyColorHandle, data.probeColorHandle);
+                // Bind this camera's sun immediately before drawing the environment clouds.
+                BindCloudSun(data);
 
                 for (int i = 0; i < 6; i++)
                 {
@@ -3287,6 +3339,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.isDynamicAmbientMode = visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic;
                 passData.isPbrSky = isPbrSky;
                 passData.hasVolumetricClouds = hasVolumetricClouds;
+                PrepareCloudSun(passData, frameData.Get<UniversalLightData>());
                 passData.isStereoEnabled = cameraData.camera.stereoEnabled;
                 passData.volumetricCloudsEnvironmentPass = volumetricCloudsEnvironmentPass;
 
