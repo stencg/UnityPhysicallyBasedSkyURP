@@ -1551,5 +1551,66 @@ Shader "Hidden/Sky/PhysicallyBasedSkyPrecomputation"
             }
             ENDHLSL
         }
+        Pass
+        {
+            Name "Environment Sky Height Fog"
+            Blend One Zero
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma vertex Vert
+            #pragma fragment FragEnvironmentSkyFog
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #define ATMOSPHERE_NO_AERIAL_PERSPECTIVE
+            #include "./AtmosphericScattering.hlsl"
+            float4x4 _PBSkyEnvironmentInvVP;
+            float4 _PBSkyEnvironmentPosition;
+            half4 FragEnvironmentSkyFog(Varyings input) : SV_Target
+            {
+                float3 ray = normalize(ComputeWorldSpacePosition(input.texcoord, UNITY_RAW_FAR_CLIP_VALUE, _PBSkyEnvironmentInvVP));
+                PositionInputs pos = GetPositionInput(input.positionCS.xy, float2(1.0 / 128.0, 1.0 / 128.0));
+                pos.deviceDepth = UNITY_RAW_FAR_CLIP_VALUE;
+                pos.positionWS = _PBSkyEnvironmentPosition.xyz + ray * _MaxFogDistance;
+                half3 fogColor, fogOpacity;
+                EvaluateAtmosphericScattering(pos, -ray, fogColor, fogOpacity);
+                half3 sky = SAMPLE_TEXTURECUBE_LOD(_SkyTexture, s_trilinear_clamp_sampler, ray, 0).rgb;
+                return half4(fogColor + (1.0 - fogOpacity) * sky, 1.0);
+            }
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "Environment Cloud Scattering"
+            Blend One SrcAlpha, Zero One
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile_local_fragment _ ATMOSPHERIC_SCATTERING_LOW_RES
+            #pragma vertex Vert
+            #pragma fragment FragEnvironmentCloudScattering
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            #include "./AtmosphericScattering.hlsl"
+            TEXTURE2D(_PBSkyEnvironmentCloudColor);
+            TEXTURE2D(_PBSkyEnvironmentCloudDistance);
+            float4x4 _PBSkyEnvironmentInvVP;
+            float4 _PBSkyEnvironmentPosition;
+            half4 FragEnvironmentCloudScattering(Varyings input) : SV_Target
+            {
+                half4 cloud = SAMPLE_TEXTURE2D_LOD(_PBSkyEnvironmentCloudColor, s_linear_clamp_sampler, input.texcoord, 0);
+                float distance = SAMPLE_TEXTURE2D_LOD(_PBSkyEnvironmentCloudDistance, s_linear_clamp_sampler, input.texcoord, 0).r;
+                if (cloud.a >= 1.0 || distance <= 0.0)
+                    return half4(0.0, 0.0, 0.0, 1.0);
+                float3 ray = normalize(ComputeWorldSpacePosition(input.texcoord, UNITY_RAW_FAR_CLIP_VALUE, _PBSkyEnvironmentInvVP));
+                PositionInputs pos = GetPositionInput(input.positionCS.xy, float2(1.0 / 128.0, 1.0 / 128.0));
+                pos.deviceDepth = 0.5;
+                pos.linearDepth = distance * dot(ray, GetViewForwardDir());
+                pos.positionWS = _PBSkyEnvironmentPosition.xyz + distance * ray;
+                half3 volumeColor, volumeOpacity;
+                EvaluateAtmosphericScattering(pos, -ray, volumeColor, volumeOpacity);
+                cloud.rgb = volumeColor * (1.0 - cloud.a) + (1.0 - volumeOpacity) * cloud.rgb;
+                return cloud;
+            }
+            ENDHLSL
+        }
     }
 }

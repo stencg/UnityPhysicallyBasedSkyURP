@@ -5,6 +5,18 @@ All notable changes to this package will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.0.17] - 2026-11-05
+
+### Fixed
+
+- Enabled Render Graph fog and atmospheric scattering for Reflection Probe cameras, with a probe-local sky-color source that does not replace the scene glossy environment.
+
+- Resolved cloud capture automatically, hid the legacy material fallback, and applied height fog and cloud atmospheric scattering to dynamic glossy environments without fogging their sky-color source.
+
+- Captured clouds using independent runtime material snapshots with current ambient lighting instead of stale serialized material values.
+
 ## [1.0.16] - 2026-11-05
 
 ### Fixed

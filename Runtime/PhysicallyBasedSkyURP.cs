@@ -29,6 +29,13 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         Low = 1,
     }
 
+#if UNITY_6000_0_OR_NEWER
+    /// <summary>Optional cloud integration that prepares a runtime environment material for the current camera.</summary>
+    public static Func<Material, Material, Camera, UniversalLightData, bool> PrepareCloudEnvironmentMaterial;
+    /// <summary>Resolves the active cloud renderer; null disables clouds in the captured environment.</summary>
+    public static Func<Camera, Material> CloudEnvironmentMaterialSource;
+#endif
+
     private Material m_PbrSkyMaterial;
     private Material m_PbrSkyLUTMaterial;
 
@@ -53,6 +60,9 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     private GeometryAtmospherePass m_GeometryAtmospherePass;
     private AtmosphericScatteringPass m_AtmosphericScatteringPass;
     private AmbientProbePass m_AmbientProbePass;
+#if UNITY_6000_0_OR_NEWER
+    private AmbientProbePass m_ReflectionFogSkyPass;
+#endif
     private PBSkyPostPass m_PBSkyPostPass;
     private StaticFogSkyCache m_StaticFogSkyCache;
 
@@ -61,8 +71,8 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
     [SerializeField] private Material m_FallbackSkyMaterial;
 
     [Header("Volumetric Clouds")]
-    [Tooltip("[Optional] The material of volumetric clouds used when updating sky reflection.")]
-    [SerializeField] private Material m_VolumetricCloudsMaterial;
+    [Tooltip("Legacy fallback material for cloud packages without automatic environment integration.")]
+    [SerializeField, HideInInspector] private Material m_VolumetricCloudsMaterial;
 
     private const string k_PbrSkyShaderName = "Hidden/Skybox/PhysicallyBasedSky";
     private const string k_PbrSkyLutShaderName = "Hidden/Sky/PhysicallyBasedSkyPrecomputation";
@@ -305,6 +315,14 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             renderPassEvent = RenderPassEvent.AfterRenderingPrePasses
         };
 
+#if UNITY_6000_0_OR_NEWER
+        m_ReflectionFogSkyPass ??= new AmbientProbePass(null)
+        {
+            fogSourceOnly = true,
+            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents - 3
+        };
+#endif
+
         m_PBSkyPostPass ??= new PBSkyPostPass()
         {
             renderPassEvent = RenderPassEvent.AfterRendering
@@ -369,6 +387,22 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             hasFog &= !(isEditingPrefab && isSceneViewFocused);
         #endif
 
+            bool allowAtmosphere = renderingData.cameraData.cameraType != CameraType.Reflection;
+#if UNITY_6000_0_OR_NEWER
+            // Reflection faces use the same depth-based atmosphere path in Render Graph.
+            allowAtmosphere = true;
+            m_AtmosphericScatteringPass.requiresIntermediateTexture = renderingData.cameraData.cameraType == CameraType.Reflection;
+            if (renderingData.cameraData.cameraType == CameraType.Reflection && hasFog &&
+                fogVolume != null && fogVolume.IsActive() && fogVolume.colorMode.value == Fog.FogColorMode.SkyColor &&
+                visualEnvVolume.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic)
+            {
+                m_ReflectionFogSkyPass.visualEnvironment = visualEnvVolume;
+                m_ReflectionFogSkyPass.fogPass = m_AtmosphericScatteringPass;
+                m_ReflectionFogSkyPass.isPbrSky = isPbrSky;
+                renderer.EnqueuePass(m_ReflectionFogSkyPass);
+            }
+#endif
+
             if (isPbrSky)
             {
                 renderer.EnqueuePass(m_PBSkyPrePass);
@@ -376,7 +410,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 m_SkyViewLUTPass.celestialBodyData = m_PBSkyPrePass.celestialBodyData;
 
                 renderer.EnqueuePass(m_SkyViewLUTPass);
-                if (pbrSkyVolume.atmosphericScattering.value && renderingData.cameraData.camera.cameraType != CameraType.Reflection)
+                if (pbrSkyVolume.atmosphericScattering.value && allowAtmosphere)
                 {
                     m_GeometryAtmospherePass.environment = visualEnvVolume;
                     m_GeometryAtmospherePass.sky = pbrSkyVolume;
@@ -384,7 +418,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 }
             }
 
-            if (hasFog && renderingData.cameraData.camera.cameraType != CameraType.Reflection)
+            if (hasFog && allowAtmosphere)
             {
                 m_AtmosphericScatteringPass.ConfigureInput(ScriptableRenderPassInput.Depth);
                 renderer.EnqueuePass(m_AtmosphericScatteringPass);
@@ -396,6 +430,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         if (visualEnvVolume.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic && renderingData.cameraData.camera.cameraType != CameraType.Reflection && RenderSettings.skybox != null)
         {
             m_AmbientProbePass.visualEnvironment = visualEnvVolume;
+            m_AmbientProbePass.fogPass = m_AtmosphericScatteringPass;
             m_AmbientProbePass.cloudsMaterial = ValidateCloudsMaterial();
             m_AmbientProbePass.isPbrSky = isPbrSky;
             Shader.EnableKeyword(k_DynamicAmbientProbeKeywordName);
@@ -425,6 +460,11 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         if (m_AmbientProbePass != null)
             m_AmbientProbePass.Dispose();
+
+#if UNITY_6000_0_OR_NEWER
+        m_ReflectionFogSkyPass?.Dispose();
+        m_ReflectionFogSkyPass = null;
+#endif
 
         if (m_StaticFogSkyCache != null)
         {
@@ -2631,7 +2671,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         }
 
-        private struct FogProperties
+        internal struct FogProperties
         {
             internal float maxFogDistance;
             internal float fogColorMode;
@@ -2650,7 +2690,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             internal float fogSkyTextureMipCount;
         }
 
-        private FogProperties GetFogProperties(Camera camera, StaticFogSkyCache.Snapshot staticFogSky)
+        internal FogProperties GetFogProperties(Camera camera, StaticFogSkyCache.Snapshot staticFogSky)
         {
             var cameraPos = camera.transform.position;
 
@@ -2706,7 +2746,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Static;
         }
 
-        private static void SetFogProperties(CommandBuffer cmd, FogProperties properties)
+        internal static void SetFogProperties(CommandBuffer cmd, FogProperties properties)
         {
             cmd.SetGlobalFloat(_MaxFogDistance, properties.maxFogDistance);
             cmd.SetGlobalFloat(_FogColorMode, properties.fogColorMode);
@@ -2876,10 +2916,97 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
         public VisualEnvironment visualEnvironment;
         public Material cloudsMaterial;
+#if UNITY_6000_0_OR_NEWER
+        private readonly System.Collections.Generic.Dictionary<Camera, Material> environmentCloudMaterials = new();
+        private readonly System.Collections.Generic.List<Camera> staleEnvironmentCameras = new();
+        private static readonly int cloudEnvironmentCameraPosition = Shader.PropertyToID("_CloudEnvironmentCameraPosition");
+        private static readonly int[] cloudAmbientSH = {
+            Shader.PropertyToID("clouds_SHAr"), Shader.PropertyToID("clouds_SHAg"), Shader.PropertyToID("clouds_SHAb"),
+            Shader.PropertyToID("clouds_SHBr"), Shader.PropertyToID("clouds_SHBg"), Shader.PropertyToID("clouds_SHBb"),
+            Shader.PropertyToID("clouds_SHC")
+        };
+
+        private Material GetEnvironmentCloudMaterial(Camera camera, UniversalLightData lightData)
+        {
+            Material source = CloudEnvironmentMaterialSource != null ? CloudEnvironmentMaterialSource(camera) : cloudsMaterial;
+            if (source == null)
+                return null;
+            foreach (var entry in environmentCloudMaterials)
+                if (entry.Key == null)
+                    staleEnvironmentCameras.Add(entry.Key);
+            foreach (Camera stale in staleEnvironmentCameras)
+            {
+                CoreUtils.Destroy(environmentCloudMaterials[stale]);
+                environmentCloudMaterials.Remove(stale);
+            }
+            staleEnvironmentCameras.Clear();
+            if (!environmentCloudMaterials.TryGetValue(camera, out Material runtime) || runtime == null || runtime.shader != source.shader)
+            {
+                CoreUtils.Destroy(runtime);
+                runtime = new Material(source) { name = "Volumetric Clouds (Environment)", hideFlags = HideFlags.HideAndDontSave };
+                environmentCloudMaterials[camera] = runtime;
+            }
+            runtime.CopyPropertiesFromMaterial(source);
+            if (PrepareCloudEnvironmentMaterial == null || !PrepareCloudEnvironmentMaterial(source, runtime, camera, lightData))
+            {
+                // Legacy cloud packages have no runtime provider; supply the current sky probe safely.
+                runtime.DisableKeyword("_CLOUDS_AMBIENT_PROBE");
+                var sh = RenderSettings.ambientProbe;
+                for (int channel = 0; channel < 3; channel++)
+                {
+                    runtime.SetVector(cloudAmbientSH[channel], new Vector4(sh[channel, 3], sh[channel, 1], sh[channel, 2], sh[channel, 0] - sh[channel, 6]));
+                    runtime.SetVector(cloudAmbientSH[channel + 3], new Vector4(sh[channel, 4], sh[channel, 5], sh[channel, 6] * 3.0f, sh[channel, 7]));
+                }
+                runtime.SetVector(cloudAmbientSH[6], new Vector4(sh[0, 8], sh[1, 8], sh[2, 8], 1.0f));
+            }
+            if (runtime.HasProperty(cloudEnvironmentCameraPosition))
+                runtime.SetVector(cloudEnvironmentCameraPosition, camera.transform.position);
+            return runtime;
+        }
+#endif
         public bool isPbrSky;
+        public AtmosphericScatteringPass fogPass;
+#if UNITY_6000_0_OR_NEWER
+        public bool fogSourceOnly;
+        private int lastFogSourceFrame = -1;
+        private int lastFogSourceHash;
+
+        private int GetReflectionFogSourceHash(Camera camera)
+        {
+            unchecked
+            {
+                int hash = visualEnvironment.GetHashCode();
+                hash = hash * 23 + (fogPass?.pbrSky != null ? fogPass.pbrSky.GetHashCode() : 0);
+                hash = hash * 23 + camera.transform.position.GetHashCode();
+                hash = hash * 23 + camera.gameObject.scene.handle.GetHashCode();
+                hash = hash * 23 + (RenderSettings.skybox != null ? RenderSettings.skybox.GetHashCode() : 0);
+                Light sun = RenderSettings.sun;
+                if (sun != null)
+                {
+                    hash = hash * 23 + sun.transform.forward.GetHashCode();
+                    hash = hash * 23 + sun.color.GetHashCode();
+                    hash = hash * 23 + sun.intensity.GetHashCode();
+                    hash = hash * 23 + sun.useColorTemperature.GetHashCode();
+                    hash = hash * 23 + sun.colorTemperature.GetHashCode();
+                }
+                return hash;
+            }
+        }
+#endif
 
         private RTHandle probeColorHandle;
         private RTHandle skyColorHandle;
+#if UNITY_6000_0_OR_NEWER
+        private RTHandle cloudColorHandle;
+        private RTHandle cloudDistanceHandle;
+        private Material environmentCompositeMaterial;
+        private static readonly ShaderTagId environmentDistanceTag = new ShaderTagId("CloudEnvironmentDistance");
+        private static readonly int environmentInvVP = Shader.PropertyToID("_PBSkyEnvironmentInvVP");
+        private static readonly int environmentPosition = Shader.PropertyToID("_PBSkyEnvironmentPosition");
+        private static readonly int environmentCloudColor = Shader.PropertyToID("_PBSkyEnvironmentCloudColor");
+        private static readonly int environmentCloudDistance = Shader.PropertyToID("_PBSkyEnvironmentCloudDistance");
+        private static readonly int fogEnabled = Shader.PropertyToID("_FogEnabled");
+#endif
 
         // The pass can be queried between disposal and cubemap reallocation.
         internal Texture environmentTexture => probeColorHandle?.rt;
@@ -3110,6 +3237,20 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         private class PassData
         {
             internal Material cloudsMaterial;
+            internal bool fogSourceOnly;
+            internal AmbientProbePass fogSourceOwner;
+            internal int fogSourceHash;
+            internal int fogSourceFrame;
+            internal Material compositeMaterial;
+            internal int skyFogPass;
+            internal int cloudScatteringPass;
+            internal bool enableFog;
+            internal bool scatterClouds;
+            internal bool lowResolutionAtmosphere;
+            internal AtmosphericScatteringPass.FogProperties fogProperties;
+            internal TextureHandle cloudColor;
+            internal TextureHandle cloudDistance;
+            internal RenderTargetIdentifier[] cloudTargets = new RenderTargetIdentifier[2];
             internal bool bindCloudSun;
             internal Vector4 cloudSunDirection;
             internal Vector4 cloudSunColor;
@@ -3198,56 +3339,87 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
             for (int i = 0; i < 6; i++)
             {
-                CoreUtils.SetRenderTarget(cmd, data.hasVolumetricClouds ? data.skyColorHandle : data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
-
+                CoreUtils.SetRenderTarget(cmd, data.skyColorHandle, ClearFlag.None, 0, (CubemapFace)i);
                 Matrix4x4 skyMatrixVP = skyMatrixP * data.skyViewMatrices[i];
-
-                // Camera matrices for skybox rendering
                 cmd.SetViewMatrix(data.skyViewMatrices[i]);
-                //cmd.SetProjectionMatrix(skyMatrixP);
-                //context.cmd.SetGlobalMatrix(unity_MatrixVP, skyMatrixVP);
                 context.cmd.SetGlobalMatrix(unity_MatrixInvVP, skyMatrixVP.inverse);
-                
                 if (data.isPbrSky)
+                    context.cmd.SetGlobalVector(worldSpaceCameraPos, Vector3.zero);
+                context.cmd.DrawRendererList(data.rendererListHandles[i]);
+            }
+
+            // Fog samples this unfogged sky, never its own composited result.
+            cmd.GenerateMips(data.skyColorHandle);
+            context.cmd.SetGlobalTexture(skyTexture, data.skyColorHandle);
+            cmd.SetGlobalFloat(skyTextureMipCounts, data.skyTextureMipCounts);
+            if (!data.fogSourceOnly)
+            {
+                cmd.SetGlobalInteger(fogEnabled, data.enableFog ? 1 : 0);
+                if (data.enableFog)
+                    AtmosphericScatteringPass.SetFogProperties(cmd, data.fogProperties);
+                cmd.SetGlobalVector(environmentPosition, data.cameraPositionWS);
+                CoreUtils.SetKeyword(data.compositeMaterial, k_AtmosphericScatteringLowResolutionKeywordName, data.lowResolutionAtmosphere);
+
+                if (data.enableFog)
                 {
-                    Blitter.BlitTexture(cmd, m_ScaleBias, RenderSettings.skybox, pass: 1);
+                    for (int i = 0; i < 6; i++)
+                    {
+                        Matrix4x4 inverse = (skyMatrixP * data.skyViewMatrices[i]).inverse;
+                        cmd.SetGlobalMatrix(environmentInvVP, inverse);
+                        CoreUtils.SetRenderTarget(cmd, data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
+                        Blitter.BlitTexture(cmd, m_ScaleBias, data.compositeMaterial, data.skyFogPass);
+                    }
                 }
                 else
+                    cmd.CopyTexture(data.skyColorHandle, data.probeColorHandle);
+
+                if (data.hasVolumetricClouds)
                 {
-                    context.cmd.DrawRendererList(data.rendererListHandles[i]);
+                    BindCloudSun(data);
+                    for (int i = 0; i < 6; i++)
+                    {
+                        Matrix4x4 inverse = (skyMatrixP * data.skyViewMatrices[i]).inverse;
+                        cmd.SetViewMatrix(data.skyViewMatrices[i]);
+                        context.cmd.SetGlobalMatrix(unity_MatrixInvVP, inverse);
+                        if (data.scatterClouds)
+                        {
+                            RTHandle color = data.cloudColor;
+                            RTHandle distance = data.cloudDistance;
+                            data.cloudTargets[0] = color.nameID;
+                            data.cloudTargets[1] = distance.nameID;
+                            cmd.SetRenderTarget(data.cloudTargets, BuiltinRenderTextureType.None);
+                            cmd.ClearRenderTarget(false, true, new Color(0, 0, 0, 1));
+                            Blitter.BlitTexture(cmd, m_ScaleBias, data.cloudsMaterial, data.volumetricCloudsEnvironmentPass);
+                            cmd.SetGlobalMatrix(environmentInvVP, inverse);
+                            cmd.SetGlobalTexture(environmentCloudColor, color);
+                            cmd.SetGlobalTexture(environmentCloudDistance, distance);
+                            CoreUtils.SetRenderTarget(cmd, data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
+                            Blitter.BlitTexture(cmd, m_ScaleBias, data.compositeMaterial, data.cloudScatteringPass);
+                        }
+                        else
+                        {
+                            CoreUtils.SetRenderTarget(cmd, data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
+                            Blitter.BlitTexture(cmd, m_ScaleBias, data.cloudsMaterial, data.volumetricCloudsEnvironmentPass);
+                        }
+                    }
+                }
+                cmd.GenerateMips(data.probeColorHandle);
+                // The opaque atmosphere pass owns enabling fog for scene geometry later.
+                cmd.SetGlobalInteger(fogEnabled, 0);
+
+                if (data.isDynamicAmbientMode)
+                {
+                    RenderSettings.customReflectionTexture = data.probeColorHandle;
+                    RenderSettings.defaultReflectionMode = DefaultReflectionMode.Custom;
                 }
             }
-
-            cmd.SetGlobalFloat(skyTextureMipCounts, data.skyTextureMipCounts);
-
-            if (data.hasVolumetricClouds)
+            else
             {
-                // We split the rendering into 2 loops to avoid calling CopyTexture() multiple times, which can be slow on the GPU side.
-                cmd.CopyTexture(data.skyColorHandle, data.probeColorHandle);
-                // Bind this camera's sun immediately before drawing the environment clouds.
-                BindCloudSun(data);
-
-                for (int i = 0; i < 6; i++)
-                {
-                    Matrix4x4 skyMatrixVP = skyMatrixP * data.skyViewMatrices[i];
-                    // Camera matrices for skybox rendering
-                    cmd.SetViewMatrix(data.skyViewMatrices[i]);
-                    //cmd.SetProjectionMatrix(skyMatrixP);
-                    //context.cmd.SetGlobalMatrix(unity_MatrixVP, skyMatrixVP);
-                    context.cmd.SetGlobalMatrix(unity_MatrixInvVP, skyMatrixVP.inverse);
-
-                    CoreUtils.SetRenderTarget(cmd, data.probeColorHandle, ClearFlag.None, 0, (CubemapFace)i);
-                    Blitter.BlitTexture(cmd, m_ScaleBias, data.cloudsMaterial, pass: data.volumetricCloudsEnvironmentPass);
-                }
-            }
-
-            if (data.isDynamicAmbientMode)
-            {
-                RenderSettings.customReflectionTexture = data.probeColorHandle;
-                RenderSettings.defaultReflectionMode = DefaultReflectionMode.Custom;
+                data.fogSourceOwner.lastFogSourceFrame = data.fogSourceFrame;
+                data.fogSourceOwner.lastFogSourceHash = data.fogSourceHash;
             }
             context.cmd.SetGlobalVector(worldSpaceCameraPos, data.cameraPositionWS);
-            context.cmd.SetGlobalFloat(disableSunDisk, 0.0f);
+            context.cmd.SetGlobalFloat(disableSunDisk, data.fogSourceOnly ? 1.0f : 0.0f);
 
             Matrix4x4 matrixVP = GL.GetGPUProjectionMatrix(data.projectionMatrix, true) * data.worldToCameraMatrix;
 
@@ -3272,7 +3444,32 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
             if (visualEnvironment.skyAmbientMode.value != VisualEnvironment.SkyAmbientMode.Dynamic)
                 return;
 
-            // add an unsafe render pass to the render graph, specifying the name and the data type that will be passed to the ExecutePass function
+            UniversalCameraData currentCameraData = frameData.Get<UniversalCameraData>();
+            int fogSourceHash = fogSourceOnly ? GetReflectionFogSourceHash(currentCameraData.camera) : 0;
+            if (fogSourceOnly && lastFogSourceFrame == Time.frameCount && lastFogSourceHash == fogSourceHash && skyColorHandle != null)
+            {
+                // Reuse the same probe-position sky for subsequent faces in this frame.
+                using var publisher = renderGraph.AddUnsafePass<PassData>("Publish Reflection Fog Sky", out var publication);
+                TextureHandle sky = renderGraph.ImportTexture(skyColorHandle);
+                publication.skyTextureMipCounts = skyColorHandle.rt.mipmapCount;
+                publisher.UseTexture(sky, AccessFlags.Read);
+                publisher.SetGlobalTextureAfterPass(sky, skyTexture);
+                publisher.AllowGlobalStateModification(true);
+                publisher.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
+                    context.cmd.SetGlobalFloat(skyTextureMipCounts, data.skyTextureMipCounts));
+                return;
+            }
+            Material environmentCloudMaterial = fogSourceOnly ? null : GetEnvironmentCloudMaterial(currentCameraData.camera, frameData.Get<UniversalLightData>());
+
+            if (environmentCompositeMaterial == null)
+                environmentCompositeMaterial = CoreUtils.CreateEngineMaterial(Shader.Find(k_PbrSkyLutShaderName));
+            int skyFogShaderPass = environmentCompositeMaterial.FindPass("Environment Sky Height Fog");
+            int cloudScatteringShaderPass = environmentCompositeMaterial.FindPass("Environment Cloud Scattering");
+            bool captureFog = !fogSourceOnly && fogPass != null && fogPass.fog != null && fogPass.fog.IsActive();
+            bool captureScattering = !fogSourceOnly && isPbrSky && fogPass != null && fogPass.pbrSky != null && fogPass.pbrSky.atmosphericScattering.value;
+            var captureFogProperties = captureFog ? fogPass.GetFogProperties(currentCameraData.camera, default) : default;
+
+            // Prepare before opening the builder so optional integrations can record their own work.
             using (var builder = renderGraph.AddUnsafePass<PassData>(profilerTag, out var passData))
             {
                 // UniversalResourceData contains all the texture handles used by the renderer, including the active color and depth textures
@@ -3281,7 +3478,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
                 UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 
-                int volumetricCloudsEnvironmentPass = GetVolumetricCloudsEnvironmentPass(cloudsMaterial);
+                int volumetricCloudsEnvironmentPass = GetVolumetricCloudsEnvironmentPass(environmentCloudMaterial);
                 bool hasVolumetricClouds = volumetricCloudsEnvironmentPass >= 0;
 
                 RenderTextureDescriptor desc = cameraData.cameraTargetDescriptor;
@@ -3290,7 +3487,7 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 
                 desc.msaaSamples = 1;
                 desc.useMipMap = true;
-                desc.autoGenerateMips = true;
+                desc.autoGenerateMips = false;
                 desc.width = reflectionResolution;
                 desc.height = reflectionResolution;
                 desc.dimension = TextureDimension.Cube;
@@ -3298,21 +3495,52 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 desc.depthBufferBits = 0;
                 desc.useDynamicScale = false;
 
-                RenderingUtils.ReAllocateHandleIfNeeded(ref probeColorHandle, desc, FilterMode.Trilinear, TextureWrapMode.Clamp, name: _GlossyEnvironmentCubeMap);
-                TextureHandle probeColorTextureHandle = renderGraph.ImportTexture(probeColorHandle);
-                passData.probeColorHandle = probeColorTextureHandle;
+                if (!fogSourceOnly)
+                {
+                    RenderingUtils.ReAllocateHandleIfNeeded(ref probeColorHandle, desc, FilterMode.Trilinear, TextureWrapMode.Clamp, name: _GlossyEnvironmentCubeMap);
+                    passData.probeColorHandle = renderGraph.ImportTexture(probeColorHandle);
+                }
+                passData.fogSourceOnly = fogSourceOnly;
+                passData.fogSourceOwner = this;
+                passData.fogSourceHash = fogSourceHash;
+                passData.fogSourceFrame = Time.frameCount;
 
-                if (hasVolumetricClouds)
                 {
                     RenderingUtils.ReAllocateHandleIfNeeded(ref skyColorHandle, desc, FilterMode.Trilinear, TextureWrapMode.Clamp, name: _SkyTexture);
                     TextureHandle skyColorTextureHandle = renderGraph.ImportTexture(skyColorHandle);
                     passData.skyColorHandle = skyColorTextureHandle;
                 }
 
-                passData.skyTextureMipCounts = visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic ?
-                    hasVolumetricClouds ? skyColorHandle.rt.mipmapCount : probeColorHandle.rt.mipmapCount : 0;
+                passData.compositeMaterial = environmentCompositeMaterial;
+                passData.skyFogPass = skyFogShaderPass;
+                passData.cloudScatteringPass = cloudScatteringShaderPass;
+                passData.enableFog = captureFog;
+                passData.lowResolutionAtmosphere = fogPass != null && fogPass.lutMaterial != null && fogPass.lutMaterial.IsKeywordEnabled(k_AtmosphericScatteringLowResolutionKeywordName);
+                passData.fogProperties = captureFogProperties;
+                // Older cloud packages can still render raw reflections without the distance output.
+                bool hasCloudDistance = hasVolumetricClouds && environmentCloudMaterial.shader.FindPassTagValue(volumetricCloudsEnvironmentPass, environmentDistanceTag).name == "1";
+                passData.scatterClouds = hasCloudDistance && (captureFog || captureScattering);
+                if (passData.scatterClouds)
+                {
+                    RenderTextureDescriptor cloudDesc = desc;
+                    cloudDesc.dimension = TextureDimension.Tex2D;
+                    cloudDesc.volumeDepth = 1;
+                    cloudDesc.useMipMap = false;
+                    cloudDesc.autoGenerateMips = false;
+                    cloudDesc.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
+                    RenderingUtils.ReAllocateHandleIfNeeded(ref cloudColorHandle, cloudDesc, FilterMode.Point, TextureWrapMode.Clamp, name: "Environment Cloud Lighting");
+                    cloudDesc.graphicsFormat = GraphicsFormat.R32_SFloat;
+                    RenderingUtils.ReAllocateHandleIfNeeded(ref cloudDistanceHandle, cloudDesc, FilterMode.Point, TextureWrapMode.Clamp, name: "Environment Cloud Distance");
+                    passData.cloudColor = renderGraph.ImportTexture(cloudColorHandle);
+                    passData.cloudDistance = renderGraph.ImportTexture(cloudDistanceHandle);
+                    builder.UseTexture(passData.cloudColor, AccessFlags.ReadWrite);
+                    builder.UseTexture(passData.cloudDistance, AccessFlags.ReadWrite);
+                }
 
-                passData.cloudsMaterial = cloudsMaterial;
+                passData.skyTextureMipCounts = visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic ?
+                    skyColorHandle.rt.mipmapCount : 0;
+
+                passData.cloudsMaterial = environmentCloudMaterial;
 
                 for (int i = 0; i < 6; i++)
                 {
@@ -3330,13 +3558,13 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
                 passData.rendererListHandles = rendererListHandles;
                 passData.skyViewMatrices = skyViewMatrices;
                 passData.skyProjectionMatrix = skyProjectionMatrix;
-                passData.cloudsMaterial = cloudsMaterial;
+                passData.cloudsMaterial = environmentCloudMaterial;
                 passData.cameraPositionWS = cameraData.camera.transform.position;
                 passData.cameraScreenSize = new Vector4(cameraResolution.x, cameraResolution.y, rcp(cameraResolution.x), rcp(cameraResolution.y));
                 passData.cameraScreenParams = new Vector4(cameraResolution.x, cameraResolution.y, 1.0f + passData.cameraScreenSize.z, 1.0f + passData.cameraScreenSize.w);
                 passData.worldToCameraMatrix = cameraData.camera.worldToCameraMatrix;
                 passData.projectionMatrix = cameraData.camera.projectionMatrix;
-                passData.isDynamicAmbientMode = visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic;
+                passData.isDynamicAmbientMode = !fogSourceOnly && visualEnvironment.skyAmbientMode.value == VisualEnvironment.SkyAmbientMode.Dynamic;
                 passData.isPbrSky = isPbrSky;
                 passData.hasVolumetricClouds = hasVolumetricClouds;
                 PrepareCloudSun(passData, frameData.Get<UniversalLightData>());
@@ -3345,15 +3573,16 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
 
                 // UnsafePasses don't setup the outputs using UseTextureFragment/UseTextureFragmentDepth, you should specify your writes with UseTexture instead
                 // Cloud blending loads the current probe contents before writing the composited result.
-                builder.UseTexture(passData.probeColorHandle, AccessFlags.ReadWrite);
+                if (!fogSourceOnly)
+                    builder.UseTexture(passData.probeColorHandle, AccessFlags.ReadWrite);
 
-                if (hasVolumetricClouds)
-                    builder.UseTexture(passData.skyColorHandle, AccessFlags.ReadWrite);
+                builder.UseTexture(passData.skyColorHandle, AccessFlags.ReadWrite);
 
                 builder.SetGlobalTextureAfterPass(
-                    hasVolumetricClouds ? passData.skyColorHandle : passData.probeColorHandle,
+                    passData.skyColorHandle,
                     skyTexture);
-                builder.SetGlobalTextureAfterPass(passData.probeColorHandle, glossyEnvironmentCubeMap);
+                if (!fogSourceOnly)
+                    builder.SetGlobalTextureAfterPass(passData.probeColorHandle, glossyEnvironmentCubeMap);
 
                 // Sky and cloud materials sample LUTs published by earlier RenderGraph passes.
                 builder.UseAllGlobalTextures(true);
@@ -3370,6 +3599,17 @@ public class PhysicallyBasedSkyURP : ScriptableRendererFeature
         #region Shared
         public void Dispose()
         {
+#if UNITY_6000_0_OR_NEWER
+            foreach (Material runtime in environmentCloudMaterials.Values)
+                CoreUtils.Destroy(runtime);
+            environmentCloudMaterials.Clear();
+            cloudColorHandle?.Release();
+            cloudDistanceHandle?.Release();
+            cloudColorHandle = null;
+            cloudDistanceHandle = null;
+            CoreUtils.Destroy(environmentCompositeMaterial);
+            environmentCompositeMaterial = null;
+#endif
             probeColorHandle?.Release();
             probeColorHandle = null;
             skyColorHandle?.Release();
